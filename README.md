@@ -50,6 +50,7 @@ python3 admittance_control.py \
 - 角速度由相邻位姿的 `R_current @ R_previous.T` 计算
 - 输出姿态使用与左乘姿态增量一致的旋转向量
 - `ServoP` 前选择与当前欧拉角连续且矩阵等价的欧拉角分支，避免 Rx 在 ±180° 跳变
+- `--execute` 启动时若检测到上次遗留的碰撞状态，会先停止并清除该状态
 - 没有速度限幅、位姿限幅或循环看门狗
 - `ActualTCPForce` 转换为环境外力；用户坐标 Y 轴和 Rx 力矩符号单独修正
 

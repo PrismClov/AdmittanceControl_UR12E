@@ -57,7 +57,7 @@ def read_pose(packet):
 def read_force(packet):
     # CR5 left/right compliance is the user-frame Y axis. Its measured sign
     # is opposite to the other axes after conversion to external wrench.
-    wrench_sign = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, -1.0])
+    wrench_sign = np.array([-1.0, 1.0, -1.0, -1.0, 1.0, -1.0])
     return wrench_sign * np.asarray(packet["ActualTCPForce"][0], dtype=float)
 
 
@@ -102,6 +102,18 @@ if args.execute:
     if int(packet["RobotMode"][0]) == 9:
         error_id = rtde_c.GetErrorID()
         raise RuntimeError(f"Robot is in error state: {error_id!r}")
+    if int(packet["RobotMode"][0]) == 11:
+        print("Clearing previous collision state")
+        rtde_c.Stop()
+        rtde_c.ClearError()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            packet = get_packet()
+            if int(packet["RobotMode"][0]) != 11:
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError("CR5 collision state could not be cleared")
     if int(packet["EnableStatus"][0]) != 1:
         response = rtde_c.EnableRobot()
         if parse_error_id(response) != 0:
