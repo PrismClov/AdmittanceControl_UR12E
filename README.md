@@ -50,7 +50,7 @@ python3 admittance_control.py \
 - 角速度由相邻位姿的 `R_current @ R_previous.T` 计算
 - 输出姿态使用与左乘姿态增量一致的旋转向量
 - 没有速度限幅、位姿限幅或循环看门狗
-- `ActualTCPForce` 统一取反，转换为环境施加到机器人末端的外力
+- `ActualTCPForce` 转换为环境外力；用户坐标 Y 轴（左右）单独取反
 
 ## 其他文件
 

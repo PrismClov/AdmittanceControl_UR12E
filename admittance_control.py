@@ -55,10 +55,10 @@ def read_pose(packet):
 
 
 def read_force(packet):
-    # ActualTCPForce reports the wrench applied by the robot to its
-    # environment. Admittance control needs the external force applied to the
-    # robot, which has the opposite sign for all six components.
-    return -np.asarray(packet["ActualTCPForce"][0], dtype=float)
+    # CR5 left/right compliance is the user-frame Y axis. Its measured sign
+    # is opposite to the other axes after conversion to external wrench.
+    wrench_sign = np.array([-1.0, 1.0, -1.0, -1.0, -1.0, -1.0])
+    return wrench_sign * np.asarray(packet["ActualTCPForce"][0], dtype=float)
 
 
 def pose_for_servop(pose):
