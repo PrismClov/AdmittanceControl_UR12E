@@ -80,6 +80,7 @@ python3 admittance_control.py \
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
 - `--direct-tcp`：固定周期直接写 Dashboard TCP，不等待当前 `ServoP` 回包
 - `--sync-feedback`：每帧六维力触发一次控制，按反馈时间戳计算 `dt`
+- 默认固定频率模式会后台持续读取反馈，每次控制只使用最新一帧，避免旧包积压
 - 没有速度限幅、位姿限幅或循环看门狗
 - `ActualTCPForce` 转换为环境外力；用户坐标 Y 轴和 Rx 力矩符号单独修正
 

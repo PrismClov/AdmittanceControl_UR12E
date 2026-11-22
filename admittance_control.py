@@ -2,6 +2,7 @@ import argparse
 import importlib.util
 from pathlib import Path
 import re
+import threading
 import time
 
 import numpy as np
@@ -117,6 +118,76 @@ def get_packet():
     return packet
 
 
+class LatestFeedback:
+    """Continuously drain force packets and expose only the newest one."""
+
+    def __init__(self, feedback):
+        self._feedback = feedback
+        self._condition = threading.Condition()
+        self._packet = None
+        self._sequence = 0
+        self._received_at = None
+        self._error = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="cr5-force-feedback", daemon=True
+        )
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        with self._condition:
+            self._condition.notify_all()
+        self._thread.join(timeout=1.0)
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                packet = get_packet()
+            except Exception as exc:
+                with self._condition:
+                    self._error = exc
+                    self._condition.notify_all()
+                self._stop.wait(0.05)
+                continue
+            with self._condition:
+                self._packet = packet
+                self._sequence += 1
+                self._received_at = time.monotonic()
+                self._error = None
+                self._condition.notify_all()
+
+    def get_latest(self, after_sequence=None, timeout=1.0):
+        with self._condition:
+            if after_sequence is not None:
+                self._condition.wait_for(
+                    lambda: self._sequence > after_sequence
+                    or self._error is not None
+                    or self._stop.is_set(),
+                    timeout=timeout,
+                )
+            else:
+                self._condition.wait_for(
+                    lambda: self._packet is not None
+                    or self._error is not None
+                    or self._stop.is_set(),
+                    timeout=timeout,
+                )
+            if self._error is not None:
+                raise RuntimeError(f"CR5 feedback error: {self._error}")
+            if self._packet is None or (
+                after_sequence is not None and self._sequence <= after_sequence
+            ):
+                raise TimeoutError("timed out waiting for a new CR5 feedback packet")
+            return (
+                self._packet,
+                self._sequence,
+                self._received_at,
+            )
+
+
 direct_reply_buffer = ""
 
 
@@ -149,8 +220,11 @@ def drain_direct_replies(raise_on_error=True):
                 raise RuntimeError(f"Direct ServoP failed: {message!r}")
 
 
+feedback_reader = LatestFeedback(rtde_recv)
+feedback_reader.start()
+
 # 当前 TCP 位姿作为初始位姿，不额外发送初始运动。
-packet = get_packet()
+packet, feedback_sequence, packet_received_at = feedback_reader.get_latest()
 if args.execute:
     if int(packet["RobotMode"][0]) == 9:
         error_id = rtde_c.GetErrorID()
@@ -161,7 +235,9 @@ if args.execute:
         rtde_c.ClearError()
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
-            packet = get_packet()
+            packet, feedback_sequence, packet_received_at = (
+                feedback_reader.get_latest(after_sequence=feedback_sequence)
+            )
             if int(packet["RobotMode"][0]) != 11:
                 break
             time.sleep(0.05)
@@ -173,7 +249,9 @@ if args.execute:
             raise RuntimeError(f"EnableRobot failed: {response!r}")
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            packet = get_packet()
+            packet, feedback_sequence, packet_received_at = (
+                feedback_reader.get_latest(after_sequence=feedback_sequence)
+            )
             if int(packet["EnableStatus"][0]) == 1:
                 break
             time.sleep(0.05)
@@ -200,8 +278,11 @@ if args.zero_sensor:
 """
 comp_filter = filter_module.MoveMeanFilter(window_size=15)
 for i in range(100):
-    F_ext_comp = comp_filter.update(read_force(get_packet()))
-F_ext = read_force(get_packet()) - F_ext_comp
+    packet, feedback_sequence, packet_received_at = (
+        feedback_reader.get_latest(after_sequence=feedback_sequence)
+    )
+    F_ext_comp = comp_filter.update(read_force(packet))
+F_ext = read_force(packet) - F_ext_comp
 
 """
 六维力传感器信号滤波
@@ -312,6 +393,7 @@ started = time.monotonic()
 next_tick = started
 previous_loop_start = None
 loop_intervals = []
+feedback_ages = []
 previous_feedback_timestamp = None
 try:
     while args.duration == 0.0 or time.monotonic() - started < args.duration:
@@ -319,7 +401,15 @@ try:
         if previous_loop_start is not None:
             loop_intervals.append(loop_start - previous_loop_start)
         previous_loop_start = loop_start
-        packet = get_packet()
+        if args.sync_feedback:
+            packet, feedback_sequence, packet_received_at = (
+                feedback_reader.get_latest(after_sequence=feedback_sequence)
+            )
+        else:
+            packet, feedback_sequence, packet_received_at = (
+                feedback_reader.get_latest()
+            )
+        feedback_ages.append(time.monotonic() - packet_received_at)
         control_dt = dt
         if args.sync_feedback:
             feedback_timestamp = float(packet["TimeStamp"][0]) * 0.001
@@ -390,6 +480,14 @@ finally:
             f" p95_ms={np.percentile(intervals_ms, 95):.3f}"
             f" max_ms={intervals_ms.max():.3f}"
         )
+        ages_ms = np.asarray(feedback_ages) * 1000.0
+        print(
+            "Feedback age:"
+            f" mean_ms={ages_ms.mean():.3f}"
+            f" p95_ms={np.percentile(ages_ms, 95):.3f}"
+            f" max_ms={ages_ms.max():.3f}"
+        )
     rtde_c.close()
+    feedback_reader.stop()
     rtde_recv.close()
     print("\nStopped")
