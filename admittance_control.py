@@ -19,6 +19,12 @@ parser.add_argument(
     default=Path("/home/orin/Desktop/视觉伺服/dobot/sdk/dobot_api.py"),
 )
 parser.add_argument("--dt", type=float, default=0.02)
+parser.add_argument(
+    "--feedback-hz",
+    type=float,
+    default=50.0,
+    help="software output rate for force samples",
+)
 parser.add_argument("--duration", type=float, default=0.0, help="0 表示持续运行")
 parser.add_argument("--execute", action="store_true", help="默认只试运行，不发送 ServoP")
 parser.add_argument("--zero-sensor", action="store_true")
@@ -36,6 +42,8 @@ parser.add_argument(
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
+if args.feedback_hz <= 0.0:
+    parser.error("--feedback-hz must be positive")
 if args.duration < 0.0:
     parser.error("--duration must be non-negative")
 if not args.sdk.is_file():
@@ -121,8 +129,9 @@ def get_packet():
 class LatestFeedback:
     """Continuously drain force packets and expose only the newest one."""
 
-    def __init__(self, feedback):
+    def __init__(self, feedback, feedback_hz):
         self._feedback = feedback
+        self._period = 1.0 / feedback_hz
         self._condition = threading.Condition()
         self._packet = None
         self._sequence = 0
@@ -143,6 +152,8 @@ class LatestFeedback:
         self._thread.join(timeout=1.0)
 
     def _run(self):
+        next_publish = time.monotonic()
+        pending_packet = None
         while not self._stop.is_set():
             try:
                 packet = get_packet()
@@ -152,12 +163,17 @@ class LatestFeedback:
                     self._condition.notify_all()
                 self._stop.wait(0.05)
                 continue
+            pending_packet = packet
+            now = time.monotonic()
+            if now < next_publish:
+                continue
             with self._condition:
-                self._packet = packet
+                self._packet = pending_packet
                 self._sequence += 1
-                self._received_at = time.monotonic()
+                self._received_at = now
                 self._error = None
                 self._condition.notify_all()
+            next_publish = max(next_publish + self._period, now)
 
     def get_latest(self, after_sequence=None, timeout=1.0):
         with self._condition:
@@ -220,7 +236,7 @@ def drain_direct_replies(raise_on_error=True):
                 raise RuntimeError(f"Direct ServoP failed: {message!r}")
 
 
-feedback_reader = LatestFeedback(rtde_recv)
+feedback_reader = LatestFeedback(rtde_recv, args.feedback_hz)
 feedback_reader.start()
 
 # 当前 TCP 位姿作为初始位姿，不额外发送初始运动。
@@ -401,14 +417,9 @@ try:
         if previous_loop_start is not None:
             loop_intervals.append(loop_start - previous_loop_start)
         previous_loop_start = loop_start
-        if args.sync_feedback:
-            packet, feedback_sequence, packet_received_at = (
-                feedback_reader.get_latest(after_sequence=feedback_sequence)
-            )
-        else:
-            packet, feedback_sequence, packet_received_at = (
-                feedback_reader.get_latest()
-            )
+        packet, feedback_sequence, packet_received_at = (
+            feedback_reader.get_latest(after_sequence=feedback_sequence)
+        )
         feedback_ages.append(time.monotonic() - packet_received_at)
         control_dt = dt
         if args.sync_feedback:
