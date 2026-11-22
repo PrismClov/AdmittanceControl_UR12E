@@ -21,6 +21,7 @@ parser.add_argument("--dt", type=float, default=0.02)
 parser.add_argument("--duration", type=float, default=0.0, help="0 表示持续运行")
 parser.add_argument("--execute", action="store_true", help="默认只试运行，不发送 ServoP")
 parser.add_argument("--zero-sensor", action="store_true")
+parser.add_argument("--timing", action="store_true", help="打印控制周期统计")
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
@@ -258,8 +259,14 @@ def ExternalForceComp(filtered_force, speed):
 print("Start", "execute=" + str(args.execute))
 started = time.monotonic()
 next_tick = started
+previous_loop_start = None
+loop_intervals = []
 try:
     while args.duration == 0.0 or time.monotonic() - started < args.duration:
+        loop_start = time.monotonic()
+        if previous_loop_start is not None:
+            loop_intervals.append(loop_start - previous_loop_start)
+        previous_loop_start = loop_start
         packet = get_packet()
         x = read_pose(packet)
         dx = estimate_tcp_speed(x)
@@ -298,6 +305,18 @@ except KeyboardInterrupt:
 finally:
     if args.execute:
         rtde_c.Stop()
+    if args.timing and loop_intervals:
+        intervals_ms = np.asarray(loop_intervals) * 1000.0
+        print(
+            "\nTiming:"
+            f" cycles={len(loop_intervals)}"
+            f" mean_hz={1000.0 / intervals_ms.mean():.3f}"
+            f" mean_ms={intervals_ms.mean():.3f}"
+            f" median_ms={np.median(intervals_ms):.3f}"
+            f" std_ms={intervals_ms.std(ddof=1):.3f}"
+            f" p95_ms={np.percentile(intervals_ms, 95):.3f}"
+            f" max_ms={intervals_ms.max():.3f}"
+        )
     rtde_c.close()
     rtde_recv.close()
     print("\nStopped")
