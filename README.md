@@ -81,6 +81,9 @@ python3 admittance_control.py \
   --timing
 ```
 
+ServoJ 使用现有 Dobot SDK 的原生 `ServoJ(...)` 格式和 1 ms 短超时；
+每次 `InverseKin` 前会清空上一周期迟到的 ServoJ 回包。
+
 ## 控制说明
 
 - 原导纳公式和 `M/D/K/Deadband` 参数保持不变

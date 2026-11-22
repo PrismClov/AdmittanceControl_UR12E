@@ -137,14 +137,6 @@ def servo_p_command(values, dt, aheadtime=50, gain=500):
     )
 
 
-def servo_j_command(joints, dt, aheadtime=50, gain=500):
-    return (
-        "ServoJ("
-        + ",".join(f"{value:.6f}" for value in joints)
-        + f",t={dt:.6f},aheadtime={aheadtime:.6f},gain={gain:.6f})"
-    )
-
-
 sdk = load_sdk(args.sdk)
 rtde_c = sdk.DobotApiDashboard(args.robot_ip, 29999)
 servo_c = rtde_c
@@ -239,6 +231,22 @@ class LatestFeedback:
 
 
 direct_reply_buffer = ""
+
+
+def drain_dashboard_replies():
+    sock = rtde_c.socket_dobot
+    old_timeout = sock.gettimeout()
+    try:
+        sock.setblocking(False)
+        while True:
+            try:
+                chunk = sock.recv(4096)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+    finally:
+        sock.settimeout(old_timeout)
 
 
 def drain_direct_replies(raise_on_error=True):
@@ -476,15 +484,22 @@ try:
                 x_c, packet["ToolVectorActual"][0][3:]
             )
             if args.servo_command == "j":
-                joints = parse_inverse_kinematics(
-                    rtde_c.InverseKin(*servo_values)
+                drain_dashboard_replies()
+                try:
+                    joints = parse_inverse_kinematics(
+                        rtde_c.InverseKin(*servo_values)
+                    )
+                except RuntimeError:
+                    drain_dashboard_replies()
+                    joints = parse_inverse_kinematics(
+                        rtde_c.InverseKin(*servo_values)
+                    )
+                response = rtde_c.ServoJ(
+                    *joints,
+                    t=control_dt,
+                    aheadtime=50,
+                    gain=500,
                 )
-                response = rtde_c.sendRecvMsg(
-                    servo_j_command(joints, control_dt),
-                    timeout=0.020,
-                )
-                if not response:
-                    raise RuntimeError("ServoJ response timed out")
                 error = parse_error_id(response)
                 if error != 0:
                     raise RuntimeError(
