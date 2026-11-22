@@ -39,6 +39,12 @@ parser.add_argument(
     action="store_true",
     help="每收到一帧六维力反馈执行一次控制，并将反馈 dt 用于导纳积分",
 )
+parser.add_argument(
+    "--servo-command",
+    choices=("p", "j"),
+    default="p",
+    help="p=ServoP; j=InverseKin + ServoJ",
+)
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
@@ -48,6 +54,8 @@ if args.duration < 0.0:
     parser.error("--duration must be non-negative")
 if not args.sdk.is_file():
     parser.error(f"Dobot SDK not found: {args.sdk}")
+if args.direct_tcp and args.servo_command == "j":
+    parser.error("--direct-tcp is only available with --servo-command p")
 
 
 def load_sdk(path):
@@ -64,6 +72,24 @@ def parse_error_id(response):
     if not values:
         raise RuntimeError(f"无法解析 CR5 回复: {response!r}")
     return int(values[0])
+
+
+def parse_inverse_kinematics(response):
+    error = parse_error_id(response)
+    if error != 0:
+        raise RuntimeError(f"InverseKin failed with error {error}: {response!r}")
+    match = re.search(r"\{([^}]*)\}", str(response))
+    if match is None:
+        raise RuntimeError(f"InverseKin returned no joint solution: {response!r}")
+    joints = [
+        float(value)
+        for value in re.findall(
+            r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", match.group(1)
+        )
+    ]
+    if len(joints) != 6 or not np.all(np.isfinite(joints)):
+        raise RuntimeError(f"Invalid InverseKin solution: {response!r}")
+    return joints
 
 
 def read_pose(packet):
@@ -108,6 +134,14 @@ def servo_p_command(values, dt, aheadtime=50, gain=500):
         f"{values[0]:.6f},{values[1]:.6f},{values[2]:.6f},"
         f"{values[3]:.6f},{values[4]:.6f},{values[5]:.6f},"
         f"t={dt:.6f},aheadtime={aheadtime:.6f},gain={gain:.6f})"
+    )
+
+
+def servo_j_command(joints, dt, aheadtime=50, gain=500):
+    return (
+        "ServoJ("
+        + ",".join(f"{value:.6f}" for value in joints)
+        + f",t={dt:.6f},aheadtime={aheadtime:.6f},gain={gain:.6f})"
     )
 
 
@@ -441,7 +475,22 @@ try:
             servo_values = pose_for_servop(
                 x_c, packet["ToolVectorActual"][0][3:]
             )
-            if args.direct_tcp:
+            if args.servo_command == "j":
+                joints = parse_inverse_kinematics(
+                    rtde_c.InverseKin(*servo_values)
+                )
+                response = rtde_c.sendRecvMsg(
+                    servo_j_command(joints, control_dt),
+                    timeout=0.020,
+                )
+                if not response:
+                    raise RuntimeError("ServoJ response timed out")
+                error = parse_error_id(response)
+                if error != 0:
+                    raise RuntimeError(
+                        f"ServoJ failed with error {error}: {response!r}"
+                    )
+            elif args.direct_tcp:
                 drain_direct_replies()
                 servo_c.send_data(servo_p_command(servo_values, control_dt))
             else:

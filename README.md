@@ -69,6 +69,18 @@ python3 admittance_control.py \
   --timing
 ```
 
+使用 `ServoJ`：
+
+```bash
+python3 admittance_control.py \
+  --robot-ip 192.168.5.5 \
+  --duration 10 \
+  --execute \
+  --servo-command j \
+  --feedback-hz 50 \
+  --timing
+```
+
 ## 控制说明
 
 - 原导纳公式和 `M/D/K/Deadband` 参数保持不变
@@ -81,6 +93,7 @@ python3 admittance_control.py \
 - `--direct-tcp`：固定周期直接写 Dashboard TCP，不等待当前 `ServoP` 回包
 - `--sync-feedback`：每帧六维力触发一次控制，按反馈时间戳计算 `dt`
 - `--feedback-hz`：六维力软件输出频率，默认 `50 Hz`
+- `--servo-command`：`p` 使用 ServoP；`j` 使用 InverseKin + ServoJ
 - 默认固定频率模式会后台持续读取反馈，每次控制只使用最新一帧，避免旧包积压
 - 硬件反馈流仍以约 `122 Hz` 到达，`--feedback-hz 50` 是软件降采样
 - 没有速度限幅、位姿限幅或循环看门狗
