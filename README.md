@@ -51,7 +51,7 @@ python3 admittance_control.py \
 - 输出姿态使用与左乘姿态增量一致的旋转向量
 - `ServoP` 前选择与当前欧拉角连续且矩阵等价的欧拉角分支，避免 Rx 在 ±180° 跳变
 - 没有速度限幅、位姿限幅或循环看门狗
-- `ActualTCPForce` 转换为环境外力；用户坐标 Y 轴（左右）单独取反
+- `ActualTCPForce` 转换为环境外力；用户坐标 Y 轴和 Rx 力矩符号单独修正
 
 ## 其他文件
 
