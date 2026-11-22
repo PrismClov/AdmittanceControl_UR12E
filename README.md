@@ -82,7 +82,7 @@ python3 admittance_control.py \
 - `--sync-feedback`：每帧六维力触发一次控制，按反馈时间戳计算 `dt`
 - 默认固定频率模式会后台持续读取反馈，每次控制只使用最新一帧，避免旧包积压
 - 没有速度限幅、位姿限幅或循环看门狗
-- `ActualTCPForce` 转换为环境外力；用户坐标 Y 轴及 Rx/Ry 力矩符号单独修正
+- `ActualTCPForce` 转换为环境外力；用户坐标 Y、Ry 正向修正，Rx 反向修正
 
 ## 其他文件
 
