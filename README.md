@@ -79,6 +79,8 @@ python3 admittance_control.py \
 - `--execute` 启动时若检测到上次遗留的碰撞状态，会先停止并清除该状态
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
 - `--direct-tcp`：固定周期直接写 Dashboard TCP，不等待当前 `ServoP` 回包
+- `--speed-filter-alpha`：TCP 速度低通系数，默认 `0.25`
+- `--target-filter-alpha`：ServoP 目标位姿低通系数，默认 `0.5`
 - `--sync-feedback`：每帧六维力触发一次控制，按反馈时间戳计算 `dt`
 - `--feedback-hz`：六维力软件输出频率，默认 `50 Hz`
 - 默认固定频率模式会后台持续读取反馈，每次控制只使用最新一帧，避免旧包积压

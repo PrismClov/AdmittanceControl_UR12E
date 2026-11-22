@@ -39,11 +39,17 @@ parser.add_argument(
     action="store_true",
     help="每收到一帧六维力反馈执行一次控制，并将反馈 dt 用于导纳积分",
 )
+parser.add_argument("--speed-filter-alpha", type=float, default=0.25)
+parser.add_argument("--target-filter-alpha", type=float, default=0.5)
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
 if args.feedback_hz <= 0.0:
     parser.error("--feedback-hz must be positive")
+if not 0.0 < args.speed_filter_alpha <= 1.0:
+    parser.error("--speed-filter-alpha must be in (0, 1]")
+if not 0.0 < args.target_filter_alpha <= 1.0:
+    parser.error("--target-filter-alpha must be in (0, 1]")
 if args.duration < 0.0:
     parser.error("--duration must be non-negative")
 if not args.sdk.is_file():
@@ -306,6 +312,14 @@ F_ext = read_force(packet) - F_ext_comp
 滤波器的相关函数见filter_module.py
 """
 F_ext_filter = filter_module.RCLowPassFilter(alpha=0.35, initial_value=F_ext)
+speed_filter = filter_module.RCLowPassFilter(
+    alpha=args.speed_filter_alpha,
+    initial_value=np.zeros(6),
+)
+target_filter = filter_module.RCLowPassFilter(
+    alpha=args.target_filter_alpha,
+    initial_value=x_init,
+)
 
 # 设计导纳控制参数
 M = [0.8, 0.8, 0.8, 0.01, 0.01, 0.01]
@@ -431,15 +445,17 @@ try:
                 control_dt = feedback_timestamp - previous_feedback_timestamp
             previous_feedback_timestamp = feedback_timestamp
         x = read_pose(packet)
-        dx = estimate_tcp_speed(x)
+        dx_raw = estimate_tcp_speed(x)
+        dx = speed_filter.update(dx_raw)
         filtered_force = F_ext_filter.update(read_force(packet))
         F_ext = filtered_force - F_ext_comp
-        ExternalForceComp(filtered_force, dx)
+        ExternalForceComp(filtered_force, dx_raw)
         x_c = admittance_control(M, D, K, control_dt, x, dx, F_ext)
+        x_servo = target_filter.update(x_c)
 
         if args.execute:
             servo_values = pose_for_servop(
-                x_c, packet["ToolVectorActual"][0][3:]
+                x_servo, packet["ToolVectorActual"][0][3:]
             )
             if args.direct_tcp:
                 drain_direct_replies()
