@@ -55,7 +55,10 @@ def read_pose(packet):
 
 
 def read_force(packet):
-    return np.asarray(packet["ActualTCPForce"][0], dtype=float)
+    # ActualTCPForce reports the wrench applied by the robot to its
+    # environment. Admittance control needs the external force applied to the
+    # robot, which has the opposite sign for all six components.
+    return -np.asarray(packet["ActualTCPForce"][0], dtype=float)
 
 
 def pose_for_servop(pose):
