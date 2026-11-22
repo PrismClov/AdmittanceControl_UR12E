@@ -69,7 +69,7 @@ def read_pose(packet):
 def read_force(packet):
     # CR5 left/right compliance is the user-frame Y axis. Its measured sign
     # is opposite to the other axes after conversion to external wrench.
-    wrench_sign = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, -1.0])
+    wrench_sign = np.array([-1.0, 1.0, -1.0, 1.0, 1.0, -1.0])
     return wrench_sign * np.asarray(packet["ActualTCPForce"][0], dtype=float)
 
 
