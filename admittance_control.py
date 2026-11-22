@@ -54,14 +54,6 @@ def read_pose(packet):
     return pose
 
 
-def read_speed(packet):
-    values = np.asarray(packet["TCPSpeedActual"][0], dtype=float)
-    speed = np.empty(6)
-    speed[:3] = values[:3] / 1000.0
-    speed[3:] = np.deg2rad(values[3:])
-    return speed
-
-
 def read_force(packet):
     return np.asarray(packet["ActualTCPForce"][0], dtype=float)
 
@@ -127,6 +119,38 @@ K = [80, 80, 80, 1.1, 1.1, 2]
 dt = args.dt
 Deadband = [1.5, 1.5, 1.5, 0.015, 0.05, 0.3]
 
+# 零漂更新只在小残差、低速和低角速度时进行。
+BiasUpdateBeta = 0.001
+BiasVelocityGate = [0.005, 0.005, 0.005, 0.02, 0.02, 0.02]
+last_velocity_pose = None
+
+
+def estimate_tcp_speed(pose):
+    """由相邻位姿计算基坐标/用户坐标下的 TCP 速度和角速度。
+
+    姿态角速度使用 R_current @ R_previous.T，得到与控制器左乘姿态增量
+    一致的旋转向量速度。
+    """
+
+    global last_velocity_pose
+    now = time.monotonic()
+    if last_velocity_pose is None:
+        last_velocity_pose = (now, np.array(pose, dtype=float))
+        return np.zeros(6)
+    previous_time, previous_pose = last_velocity_pose
+    elapsed = now - previous_time
+    last_velocity_pose = (now, np.array(pose, dtype=float))
+    if elapsed <= 0.0:
+        return np.zeros(6)
+
+    speed = np.empty(6)
+    speed[:3] = (np.array(pose[:3]) - previous_pose[:3]) / elapsed
+    previous_rotation = R.from_rotvec(previous_pose[3:])
+    current_rotation = R.from_rotvec(pose[3:])
+    rotation_delta = current_rotation * previous_rotation.inv()
+    speed[3:] = rotation_delta.as_rotvec() / elapsed
+    return speed
+
 
 def admittance_control(M, D, K, dt, x, dx, F_ext):
     """导纳控制
@@ -173,13 +197,16 @@ def admittance_control(M, D, K, dt, x, dx, F_ext):
     return x_c
 
 
-comp = [filter_module.MoveMeanFilter(window_size=5) for _ in range(6)]
-
-
-def ExternalForceComp():
+def ExternalForceComp(filtered_force, speed):
+    residual = filtered_force - F_ext_comp
+    motion_is_small = all(
+        abs(speed[i]) < BiasVelocityGate[i] for i in range(6)
+    )
+    if not motion_is_small:
+        return
     for i in range(6):
-        if abs(F_ext[i]) < Deadband[i]:
-            F_ext_comp[i] += comp[i].update(F_ext[i])
+        if abs(residual[i]) < Deadband[i]:
+            F_ext_comp[i] += BiasUpdateBeta * residual[i]
 
 
 print("Start", "execute=" + str(args.execute))
@@ -189,9 +216,10 @@ try:
     while args.duration == 0.0 or time.monotonic() - started < args.duration:
         packet = get_packet()
         x = read_pose(packet)
-        dx = read_speed(packet)
-        F_ext = F_ext_filter.update(read_force(packet)) - F_ext_comp
-        ExternalForceComp()
+        dx = estimate_tcp_speed(x)
+        filtered_force = F_ext_filter.update(read_force(packet))
+        F_ext = filtered_force - F_ext_comp
+        ExternalForceComp(filtered_force, dx)
         x_c = admittance_control(M, D, K, dt, x, dx, F_ext)
 
         if args.execute:
