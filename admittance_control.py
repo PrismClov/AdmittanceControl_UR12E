@@ -22,6 +22,11 @@ parser.add_argument("--duration", type=float, default=0.0, help="0 表示持续�
 parser.add_argument("--execute", action="store_true", help="默认只试运行，不发送 ServoP")
 parser.add_argument("--zero-sensor", action="store_true")
 parser.add_argument("--timing", action="store_true", help="打印控制周期统计")
+parser.add_argument(
+    "--direct-tcp",
+    action="store_true",
+    help="固定周期直接发送 ServoP，不等待当前命令回包",
+)
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
@@ -58,7 +63,7 @@ def read_pose(packet):
 def read_force(packet):
     # CR5 left/right compliance is the user-frame Y axis. Its measured sign
     # is opposite to the other axes after conversion to external wrench.
-    wrench_sign = np.array([-1.0, 1.0, -1.0, -1.0, 1.0, -1.0])
+    wrench_sign = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, -1.0])
     return wrench_sign * np.asarray(packet["ActualTCPForce"][0], dtype=float)
 
 
@@ -83,8 +88,22 @@ def pose_for_servop(pose, reference_rpy_degrees):
     return values
 
 
+def servo_p_command(values, dt, aheadtime=50, gain=500):
+    return (
+        "ServoP("
+        f"{values[0]:.6f},{values[1]:.6f},{values[2]:.6f},"
+        f"{values[3]:.6f},{values[4]:.6f},{values[5]:.6f},"
+        f"t={dt:.6f},aheadtime={aheadtime:.6f},gain={gain:.6f})"
+    )
+
+
 sdk = load_sdk(args.sdk)
 rtde_c = sdk.DobotApiDashboard(args.robot_ip, 29999)
+servo_c = (
+    sdk.DobotApiDashboard(args.robot_ip, 29999)
+    if args.direct_tcp
+    else rtde_c
+)
 rtde_recv = sdk.DobotApiFeedBack(args.robot_ip, 30004)
 if not rtde_recv.socket_dobot:
     raise ConnectionError(f"无法连接 CR5 反馈端口 {args.robot_ip}:30004")
@@ -95,6 +114,38 @@ def get_packet():
     if packet is None:
         raise RuntimeError("CR5 反馈包缺失")
     return packet
+
+
+direct_reply_buffer = ""
+
+
+def drain_direct_replies(raise_on_error=True):
+    """Drain completed replies without waiting for the current ServoP."""
+
+    global direct_reply_buffer
+    if not args.direct_tcp:
+        return
+    sock = servo_c.socket_dobot
+    old_timeout = sock.gettimeout()
+    try:
+        sock.setblocking(False)
+        while True:
+            try:
+                chunk = sock.recv(4096)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            direct_reply_buffer += chunk.decode(errors="replace")
+    finally:
+        sock.settimeout(old_timeout)
+
+    messages = direct_reply_buffer.split(";")
+    direct_reply_buffer = messages.pop()
+    if raise_on_error:
+        for message in messages:
+            if message.strip() and parse_error_id(message) != 0:
+                raise RuntimeError(f"Direct ServoP failed: {message!r}")
 
 
 # 当前 TCP 位姿作为初始位姿，不额外发送初始运动。
@@ -276,15 +327,24 @@ try:
         x_c = admittance_control(M, D, K, dt, x, dx, F_ext)
 
         if args.execute:
-            response = rtde_c.ServoP(
-                *pose_for_servop(x_c, packet["ToolVectorActual"][0][3:]),
-                t=dt,
-                aheadtime=50,
-                gain=500,
+            servo_values = pose_for_servop(
+                x_c, packet["ToolVectorActual"][0][3:]
             )
-            error = parse_error_id(response)
-            if error != 0:
-                raise RuntimeError(f"ServoP failed with error {error}: {response!r}")
+            if args.direct_tcp:
+                drain_direct_replies()
+                servo_c.send_data(servo_p_command(servo_values, dt))
+            else:
+                response = servo_c.ServoP(
+                    *servo_values,
+                    t=dt,
+                    aheadtime=50,
+                    gain=500,
+                )
+                error = parse_error_id(response)
+                if error != 0:
+                    raise RuntimeError(
+                        f"ServoP failed with error {error}: {response!r}"
+                    )
 
         print(
             "x_c",
@@ -304,6 +364,8 @@ except KeyboardInterrupt:
     print("\nInterrupted")
 finally:
     if args.execute:
+        if args.direct_tcp:
+            drain_direct_replies(raise_on_error=False)
         rtde_c.Stop()
     if args.timing and loop_intervals:
         intervals_ms = np.asarray(loop_intervals) * 1000.0
@@ -318,5 +380,7 @@ finally:
             f" max_ms={intervals_ms.max():.3f}"
         )
     rtde_c.close()
+    if servo_c is not rtde_c:
+        servo_c.close()
     rtde_recv.close()
     print("\nStopped")
