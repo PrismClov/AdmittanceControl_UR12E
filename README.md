@@ -8,10 +8,10 @@
 - `192.168.5.5:29999`：发送 `ServoP`，退出时发送 `Stop`
 - `SixForceHome()`：由 `--zero-sensor` 显式触发
 
-默认使用：
+默认使用仓库内由跃疆 `dobot` 包同步的 SDK：
 
 ```text
-/home/orin/Desktop/视觉伺服/dobot/sdk/dobot_api.py
+sdk/dobot_api.py
 ```
 
 也可通过 `--sdk` 指定 `dobot_api.py` 路径。

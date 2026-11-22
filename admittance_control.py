@@ -16,7 +16,7 @@ parser.add_argument("--robot-ip", default="192.168.5.5")
 parser.add_argument(
     "--sdk",
     type=Path,
-    default=Path("/home/orin/Desktop/视觉伺服/dobot/sdk/dobot_api.py"),
+    default=Path(__file__).with_name("sdk") / "dobot_api.py",
 )
 parser.add_argument("--dt", type=float, default=0.02)
 parser.add_argument(
