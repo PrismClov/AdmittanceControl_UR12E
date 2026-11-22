@@ -22,7 +22,7 @@ parser.add_argument("--dt", type=float, default=0.02)
 parser.add_argument(
     "--feedback-hz",
     type=float,
-    default=60.0,
+    default=50.0,
     help="software output rate for force samples",
 )
 parser.add_argument("--duration", type=float, default=0.0, help="0 表示持续运行")
@@ -39,12 +39,6 @@ parser.add_argument(
     action="store_true",
     help="每收到一帧六维力反馈执行一次控制，并将反馈 dt 用于导纳积分",
 )
-parser.add_argument(
-    "--servo-command",
-    choices=("p", "j"),
-    default="p",
-    help="p=ServoP; j=InverseKin + ServoJ",
-)
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
@@ -54,8 +48,6 @@ if args.duration < 0.0:
     parser.error("--duration must be non-negative")
 if not args.sdk.is_file():
     parser.error(f"Dobot SDK not found: {args.sdk}")
-if args.direct_tcp and args.servo_command == "j":
-    parser.error("--direct-tcp is only available with --servo-command p")
 
 
 def load_sdk(path):
@@ -72,30 +64,6 @@ def parse_error_id(response):
     if not values:
         raise RuntimeError(f"无法解析 CR5 回复: {response!r}")
     return int(values[0])
-
-
-def parse_inverse_kinematics(response):
-    matches = list(
-        re.finditer(
-            r"(-?\d+),\{([^}]*)\},InverseKin\(",
-            str(response),
-        )
-    )
-    if not matches:
-        raise RuntimeError(f"InverseKin returned no joint solution: {response!r}")
-    match = matches[-1]
-    error = int(match.group(1))
-    if error != 0:
-        raise RuntimeError(f"InverseKin failed with error {error}: {response!r}")
-    joints = [
-        float(value)
-        for value in re.findall(
-            r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", match.group(2)
-        )
-    ]
-    if len(joints) != 6 or not np.all(np.isfinite(joints)):
-        raise RuntimeError(f"Invalid InverseKin solution: {response!r}")
-    return joints
 
 
 def read_pose(packet):
@@ -239,22 +207,6 @@ class LatestFeedback:
 direct_reply_buffer = ""
 
 
-def drain_dashboard_replies():
-    sock = rtde_c.socket_dobot
-    old_timeout = sock.gettimeout()
-    try:
-        sock.setblocking(False)
-        while True:
-            try:
-                chunk = sock.recv(4096)
-            except BlockingIOError:
-                break
-            if not chunk:
-                break
-    finally:
-        sock.settimeout(old_timeout)
-
-
 def drain_direct_replies(raise_on_error=True):
     """Drain completed replies without waiting for the current ServoP."""
 
@@ -321,10 +273,6 @@ if args.execute:
             time.sleep(0.05)
         else:
             raise RuntimeError("CR5 did not become enabled")
-    for command in ("SpeedFactor", "VelJ", "AccJ"):
-        response = getattr(rtde_c, command)(20)
-        if parse_error_id(response) != 0:
-            raise RuntimeError(f"CR5 {command}(20) failed: {response!r}")
 
 x_init = read_pose(packet)
 print(x_init)
@@ -370,11 +318,6 @@ Deadband = [1.5, 1.5, 1.5, 0.015, 0.05, 0.3]
 BiasUpdateBeta = 0.001
 BiasVelocityGate = [0.005, 0.005, 0.005, 0.02, 0.02, 0.02]
 last_velocity_pose = None
-joint_cmd_last_time = None
-joint_cmd_prev_position = None
-joint_command_max_velocity = 2.0
-joint_command_max_dt = 0.05
-joint_command_smoothing_factor = 0.1
 
 
 def estimate_tcp_speed(pose):
@@ -402,36 +345,6 @@ def estimate_tcp_speed(pose):
     rotation_delta = current_rotation * previous_rotation.inv()
     speed[3:] = rotation_delta.as_rotvec() / elapsed
     return speed
-
-
-def smooth_joint_target(goal_joint_degrees, current_joint_degrees, now_sec):
-    """Match the Yuejiang DobotInterface.set_joints smoothing and rate limit."""
-
-    global joint_cmd_last_time, joint_cmd_prev_position
-    goal = np.deg2rad(np.asarray(goal_joint_degrees, dtype=float))
-    current = np.deg2rad(np.asarray(current_joint_degrees, dtype=float))
-    if joint_cmd_last_time is None:
-        dt_raw = 0.02
-    else:
-        dt_raw = max(now_sec - joint_cmd_last_time, 1e-6)
-    dt_capped = min(dt_raw, joint_command_max_dt)
-    if joint_cmd_prev_position is not None and dt_raw <= 0.5:
-        reference = joint_cmd_prev_position
-    else:
-        reference = current
-    smoothed = (
-        (1.0 - joint_command_smoothing_factor) * goal
-        + joint_command_smoothing_factor * reference
-    )
-    velocity = np.clip(
-        (smoothed - reference) / dt_capped,
-        -joint_command_max_velocity,
-        joint_command_max_velocity,
-    )
-    limited = reference + velocity * dt_capped
-    joint_cmd_prev_position = limited
-    joint_cmd_last_time = now_sec
-    return np.rad2deg(limited)
 
 
 def admittance_control(M, D, K, dt, x, dx, F_ext):
@@ -504,14 +417,9 @@ try:
         if previous_loop_start is not None:
             loop_intervals.append(loop_start - previous_loop_start)
         previous_loop_start = loop_start
-        if args.sync_feedback or args.feedback_hz <= 1.0 / dt:
-            packet, feedback_sequence, packet_received_at = (
-                feedback_reader.get_latest(after_sequence=feedback_sequence)
-            )
-        else:
-            packet, feedback_sequence, packet_received_at = (
-                feedback_reader.get_latest()
-            )
+        packet, feedback_sequence, packet_received_at = (
+            feedback_reader.get_latest(after_sequence=feedback_sequence)
+        )
         feedback_ages.append(time.monotonic() - packet_received_at)
         control_dt = dt
         if args.sync_feedback:
@@ -533,34 +441,7 @@ try:
             servo_values = pose_for_servop(
                 x_c, packet["ToolVectorActual"][0][3:]
             )
-            if args.servo_command == "j":
-                drain_dashboard_replies()
-                try:
-                    joints = parse_inverse_kinematics(
-                        rtde_c.InverseKin(*servo_values)
-                    )
-                except RuntimeError:
-                    drain_dashboard_replies()
-                    joints = parse_inverse_kinematics(
-                        rtde_c.InverseKin(*servo_values)
-                    )
-                joints = smooth_joint_target(
-                    joints,
-                    packet["QActual"][0],
-                    time.time(),
-                )
-                response = rtde_c.ServoJ(
-                    *joints,
-                    t=control_dt,
-                    aheadtime=50,
-                    gain=500,
-                )
-                error = parse_error_id(response)
-                if error != 0:
-                    raise RuntimeError(
-                        f"ServoJ failed with error {error}: {response!r}"
-                    )
-            elif args.direct_tcp:
+            if args.direct_tcp:
                 drain_direct_replies()
                 servo_c.send_data(servo_p_command(servo_values, control_dt))
             else:

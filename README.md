@@ -8,7 +8,7 @@
 - `192.168.5.5:29999`：发送 `ServoP`，退出时发送 `Stop`
 - `SixForceHome()`：由 `--zero-sensor` 显式触发
 
-默认使用仓库内由跃疆 `dobot` 包同步的 SDK：
+默认使用仓库内由跃疆 SDK 同步的文件：
 
 ```text
 sdk/dobot_api.py
@@ -69,21 +69,6 @@ python3 admittance_control.py \
   --timing
 ```
 
-使用 `ServoJ`：
-
-```bash
-python3 admittance_control.py \
-  --robot-ip 192.168.5.5 \
-  --duration 10 \
-  --execute \
-  --servo-command j \
-  --feedback-hz 60 \
-  --timing
-```
-
-ServoJ 使用现有 Dobot SDK 的原生 `ServoJ(...)` 格式和 1 ms 短超时；
-每次 `InverseKin` 前会清空上一周期迟到的 ServoJ 回包。
-
 ## 控制说明
 
 - 原导纳公式和 `M/D/K/Deadband` 参数保持不变
@@ -95,11 +80,9 @@ ServoJ 使用现有 Dobot SDK 的原生 `ServoJ(...)` 格式和 1 ms 短超时�
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
 - `--direct-tcp`：固定周期直接写 Dashboard TCP，不等待当前 `ServoP` 回包
 - `--sync-feedback`：每帧六维力触发一次控制，按反馈时间戳计算 `dt`
-- `--feedback-hz`：六维力软件输出频率，默认 `60 Hz`
-- `--servo-command`：`p` 使用 ServoP；`j` 使用 InverseKin + ServoJ
+- `--feedback-hz`：六维力软件输出频率，默认 `50 Hz`
 - 默认固定频率模式会后台持续读取反馈，每次控制只使用最新一帧，避免旧包积压
-- 硬件反馈流仍以约 `122 Hz` 到达，默认以 `60 Hz` 软件降采样
-- `ServoJ` 路径按跃疆 `DobotInterface.set_joints()` 的 0.1 平滑和 2 rad/s 关节限速执行
+- 硬件反馈流仍以约 `122 Hz` 到达，`--feedback-hz 50` 是软件降采样
 - 没有速度限幅、位姿限幅或循环看门狗
 - `ActualTCPForce` 转换为环境外力；用户坐标 Y、Ry 正向修正，Rx 反向修正
 
