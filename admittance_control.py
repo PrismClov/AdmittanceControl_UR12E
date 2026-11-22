@@ -27,6 +27,11 @@ parser.add_argument(
     action="store_true",
     help="固定周期直接发送 ServoP，不等待当前命令回包",
 )
+parser.add_argument(
+    "--sync-feedback",
+    action="store_true",
+    help="每收到一帧六维力反馈执行一次控制，并将反馈 dt 用于导纳积分",
+)
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
@@ -196,7 +201,6 @@ if args.zero_sensor:
 comp_filter = filter_module.MoveMeanFilter(window_size=15)
 for i in range(100):
     F_ext_comp = comp_filter.update(read_force(get_packet()))
-    time.sleep(0.02)
 F_ext = read_force(get_packet()) - F_ext_comp
 
 """
@@ -308,6 +312,7 @@ started = time.monotonic()
 next_tick = started
 previous_loop_start = None
 loop_intervals = []
+previous_feedback_timestamp = None
 try:
     while args.duration == 0.0 or time.monotonic() - started < args.duration:
         loop_start = time.monotonic()
@@ -315,12 +320,21 @@ try:
             loop_intervals.append(loop_start - previous_loop_start)
         previous_loop_start = loop_start
         packet = get_packet()
+        control_dt = dt
+        if args.sync_feedback:
+            feedback_timestamp = float(packet["TimeStamp"][0]) * 0.001
+            if (
+                previous_feedback_timestamp is not None
+                and feedback_timestamp > previous_feedback_timestamp
+            ):
+                control_dt = feedback_timestamp - previous_feedback_timestamp
+            previous_feedback_timestamp = feedback_timestamp
         x = read_pose(packet)
         dx = estimate_tcp_speed(x)
         filtered_force = F_ext_filter.update(read_force(packet))
         F_ext = filtered_force - F_ext_comp
         ExternalForceComp(filtered_force, dx)
-        x_c = admittance_control(M, D, K, dt, x, dx, F_ext)
+        x_c = admittance_control(M, D, K, control_dt, x, dx, F_ext)
 
         if args.execute:
             servo_values = pose_for_servop(
@@ -328,11 +342,11 @@ try:
             )
             if args.direct_tcp:
                 drain_direct_replies()
-                servo_c.send_data(servo_p_command(servo_values, dt))
+                servo_c.send_data(servo_p_command(servo_values, control_dt))
             else:
                 response = servo_c.ServoP(
                     *servo_values,
-                    t=dt,
+                    t=control_dt,
                     aheadtime=50,
                     gain=500,
                 )
@@ -350,12 +364,13 @@ try:
             end="\r",
             flush=True,
         )
-        next_tick += dt
-        delay = next_tick - time.monotonic()
-        if delay > 0.0:
-            time.sleep(delay)
-        else:
-            next_tick = time.monotonic()
+        if not args.sync_feedback:
+            next_tick += dt
+            delay = next_tick - time.monotonic()
+            if delay > 0.0:
+                time.sleep(delay)
+            else:
+                next_tick = time.monotonic()
 except KeyboardInterrupt:
     print("\nInterrupted")
 finally:

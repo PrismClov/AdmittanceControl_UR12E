@@ -57,6 +57,18 @@ python3 admittance_control.py \
 直发模式复用唯一的 `29999` TCP 控制连接，不在当前控制周期等待 `ServoP` 回包；
 已完成的回包会在后续周期非阻塞读取并检查错误。
 
+按六维力反馈帧同步控制：
+
+```bash
+python3 admittance_control.py \
+  --robot-ip 192.168.5.5 \
+  --duration 10 \
+  --execute \
+  --direct-tcp \
+  --sync-feedback \
+  --timing
+```
+
 ## 控制说明
 
 - 原导纳公式和 `M/D/K/Deadband` 参数保持不变
@@ -67,6 +79,7 @@ python3 admittance_control.py \
 - `--execute` 启动时若检测到上次遗留的碰撞状态，会先停止并清除该状态
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
 - `--direct-tcp`：固定周期直接写 Dashboard TCP，不等待当前 `ServoP` 回包
+- `--sync-feedback`：每帧六维力触发一次控制，按反馈时间戳计算 `dt`
 - 没有速度限幅、位姿限幅或循环看门狗
 - `ActualTCPForce` 转换为环境外力；用户坐标 Y 轴和 Rx 力矩符号单独修正
 
