@@ -61,11 +61,24 @@ def read_force(packet):
     return wrench_sign * np.asarray(packet["ActualTCPForce"][0], dtype=float)
 
 
-def pose_for_servop(pose):
+def pose_for_servop(pose, reference_rpy_degrees):
     pose = np.asarray(pose, dtype=float)
     values = np.empty(6)
     values[:3] = pose[:3] * 1000.0
-    values[3:] = R.from_rotvec(pose[3:]).as_euler("xyz", degrees=True)
+    rotation = R.from_rotvec(pose[3:])
+    canonical = rotation.as_euler("xyz", degrees=True)
+    alternate = np.array(
+        [canonical[0] + 180.0, 180.0 - canonical[1], canonical[2] + 180.0]
+    )
+    reference = np.asarray(reference_rpy_degrees, dtype=float)
+    candidates = []
+    for candidate in (canonical, alternate):
+        candidate = candidate + 360.0 * np.round(
+            (reference - candidate) / 360.0
+        )
+        error = (candidate - reference + 180.0) % 360.0 - 180.0
+        candidates.append((float(np.max(np.abs(error))), candidate))
+    values[3:] = min(candidates, key=lambda item: item[0])[1]
     return values
 
 
@@ -245,7 +258,7 @@ try:
 
         if args.execute:
             response = rtde_c.ServoP(
-                *pose_for_servop(x_c),
+                *pose_for_servop(x_c, packet["ToolVectorActual"][0][3:]),
                 t=dt,
                 aheadtime=50,
                 gain=500,
