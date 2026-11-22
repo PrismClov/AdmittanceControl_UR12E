@@ -99,11 +99,7 @@ def servo_p_command(values, dt, aheadtime=50, gain=500):
 
 sdk = load_sdk(args.sdk)
 rtde_c = sdk.DobotApiDashboard(args.robot_ip, 29999)
-servo_c = (
-    sdk.DobotApiDashboard(args.robot_ip, 29999)
-    if args.direct_tcp
-    else rtde_c
-)
+servo_c = rtde_c
 rtde_recv = sdk.DobotApiFeedBack(args.robot_ip, 30004)
 if not rtde_recv.socket_dobot:
     raise ConnectionError(f"无法连接 CR5 反馈端口 {args.robot_ip}:30004")
@@ -380,7 +376,5 @@ finally:
             f" max_ms={intervals_ms.max():.3f}"
         )
     rtde_c.close()
-    if servo_c is not rtde_c:
-        servo_c.close()
     rtde_recv.close()
     print("\nStopped")
