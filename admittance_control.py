@@ -82,6 +82,23 @@ def get_packet():
 
 # 当前 TCP 位姿作为初始位姿，不额外发送初始运动。
 packet = get_packet()
+if args.execute:
+    if int(packet["RobotMode"][0]) == 9:
+        error_id = rtde_c.GetErrorID()
+        raise RuntimeError(f"Robot is in error state: {error_id!r}")
+    if int(packet["EnableStatus"][0]) != 1:
+        response = rtde_c.EnableRobot()
+        if parse_error_id(response) != 0:
+            raise RuntimeError(f"EnableRobot failed: {response!r}")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            packet = get_packet()
+            if int(packet["EnableStatus"][0]) == 1:
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError("CR5 did not become enabled")
+
 x_init = read_pose(packet)
 print(x_init)
 x_d = x_init
