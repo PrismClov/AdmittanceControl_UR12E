@@ -59,6 +59,7 @@ def read_force(packet):
 
 
 def pose_for_servop(pose):
+    pose = np.asarray(pose, dtype=float)
     values = np.empty(6)
     values[:3] = pose[:3] * 1000.0
     values[3:] = R.from_rotvec(pose[3:]).as_euler("xyz", degrees=True)
