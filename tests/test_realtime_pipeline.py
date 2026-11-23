@@ -26,6 +26,9 @@ class LatestRobotStateTest(unittest.TestCase):
             latest, latest_sequence, _ = reader.snapshot()
             self.assertGreaterEqual(latest_sequence, sequence)
             self.assertGreaterEqual(latest["value"], first["value"])
+            stats = reader.period_stats()
+            self.assertGreater(stats["samples"], 0)
+            self.assertGreater(stats["median_hz"], 50.0)
         finally:
             reader.stop()
 

@@ -8,6 +8,8 @@ import socket
 import threading
 import time
 
+import numpy as np
+
 
 def parse_error_id(message):
     values = re.findall(r"-?\d+", str(message))
@@ -25,6 +27,7 @@ class LatestRobotState:
         self._packet = None
         self._sequence = 0
         self._received_at = None
+        self._receive_intervals = deque(maxlen=512)
         self._error = None
         self._stop = threading.Event()
         self._thread = threading.Thread(
@@ -55,6 +58,10 @@ class LatestRobotState:
                 self._stop.wait(0.05)
                 continue
             with self._condition:
+                if self._received_at is not None:
+                    interval = time.monotonic() - self._received_at
+                    if 0.001 <= interval <= 0.1:
+                        self._receive_intervals.append(interval)
                 self._packet = packet
                 self._sequence += 1
                 self._received_at = time.monotonic()
@@ -82,6 +89,21 @@ class LatestRobotState:
             if self._packet is None:
                 raise TimeoutError("CR5 feedback is not available")
             return self._packet, self._sequence, self._received_at
+
+    def period_stats(self):
+        with self._condition:
+            intervals = np.asarray(self._receive_intervals, dtype=float)
+        if intervals.size == 0:
+            raise RuntimeError("not enough feedback timing samples")
+        median = float(np.median(intervals))
+        return {
+            "samples": int(intervals.size),
+            "mean_s": float(intervals.mean()),
+            "median_s": median,
+            "p95_s": float(np.percentile(intervals, 95)),
+            "max_s": float(intervals.max()),
+            "median_hz": 1.0 / median,
+        }
 
 
 class ServoPStream:

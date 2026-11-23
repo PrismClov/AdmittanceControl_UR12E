@@ -18,7 +18,11 @@ parser.add_argument(
     type=Path,
     default=Path(__file__).with_name("sdk") / "dobot_api.py",
 )
-parser.add_argument("--dt", type=float, default=0.02)
+parser.add_argument(
+    "--dt",
+    type=float,
+    help="control period; omit to match the measured feedback rate",
+)
 parser.add_argument(
     "--servo-period",
     type=float,
@@ -32,7 +36,7 @@ parser.add_argument("--timing", action="store_true", help="打印控制周期统
 parser.add_argument("--speed-filter-alpha", type=float, default=1.0)
 parser.add_argument("--target-filter-alpha", type=float, default=1.0)
 args = parser.parse_args()
-if args.dt <= 0.0:
+if args.dt is not None and args.dt <= 0.0:
     parser.error("--dt must be positive")
 if args.servo_period <= 0.0:
     parser.error("--servo-period must be positive")
@@ -196,42 +200,58 @@ target_filter = filter_module.RCLowPassFilter(
 )
 
 # 设计导纳控制参数
+# 控制周期默认与 30004 反馈频率对齐；--dt 可显式覆盖。
+feedback_timing = feedback_reader.period_stats()
+dt = args.dt if args.dt is not None else feedback_timing["median_s"]
+if not np.isfinite(dt) or not 0.004 <= dt <= 0.1:
+    raise RuntimeError(f"invalid aligned control period: {dt}")
+print(
+    "Feedback:"
+    f" median_hz={feedback_timing['median_hz']:.3f}"
+    f" median_ms={feedback_timing['median_s'] * 1000.0:.3f}"
+    f" p95_ms={feedback_timing['p95_s'] * 1000.0:.3f}"
+)
+print(f"Control period: {dt * 1000.0:.3f} ms ({1.0 / dt:.3f} Hz)")
+
+# 设计导纳控制参数
 M = [0.8, 0.8, 0.8, 0.01, 0.01, 0.01]
 D = [16, 16, 16, 0.12, 0.12, 0.16]
 K = [80, 80, 80, 1.1, 1.1, 2]
-dt = args.dt
 Deadband = [1.5, 1.5, 1.5, 0.015, 0.05, 0.3]
 
 # 零漂更新只在小残差、低速和低角速度时进行。
 BiasUpdateBeta = 0.001
 BiasVelocityGate = [0.005, 0.005, 0.005, 0.02, 0.02, 0.02]
-last_velocity_pose = None
+last_velocity_state = None
 
 
-def estimate_tcp_speed(pose):
+def estimate_tcp_speed(pose, sample_time):
     """由相邻位姿计算基坐标/用户坐标下的 TCP 速度和角速度。
 
     姿态角速度使用 R_current @ R_previous.T，得到与控制器左乘姿态增量
     一致的旋转向量速度。
     """
 
-    global last_velocity_pose
-    now = time.monotonic()
-    if last_velocity_pose is None:
-        last_velocity_pose = (now, np.array(pose, dtype=float))
+    global last_velocity_state
+    pose = np.asarray(pose, dtype=float)
+    sample_time = float(sample_time)
+    if last_velocity_state is None:
+        last_velocity_state = (sample_time, pose.copy(), np.zeros(6))
         return np.zeros(6)
-    previous_time, previous_pose = last_velocity_pose
-    elapsed = now - previous_time
-    last_velocity_pose = (now, np.array(pose, dtype=float))
+    previous_time, previous_pose, previous_speed = last_velocity_state
+    if sample_time <= previous_time:
+        return previous_speed.copy()
+    elapsed = sample_time - previous_time
     if elapsed <= 0.0:
         return np.zeros(6)
 
     speed = np.empty(6)
-    speed[:3] = (np.array(pose[:3]) - previous_pose[:3]) / elapsed
+    speed[:3] = (pose[:3] - previous_pose[:3]) / elapsed
     previous_rotation = R.from_rotvec(previous_pose[3:])
     current_rotation = R.from_rotvec(pose[3:])
     rotation_delta = current_rotation * previous_rotation.inv()
     speed[3:] = rotation_delta.as_rotvec() / elapsed
+    last_velocity_state = (sample_time, pose.copy(), speed.copy())
     return speed
 
 
@@ -305,6 +325,7 @@ print("Start", "execute=" + str(args.execute))
 started = time.monotonic()
 next_tick = started
 previous_loop_start = None
+last_status_print = started
 loop_intervals = []
 feedback_ages = []
 try:
@@ -317,7 +338,7 @@ try:
         feedback_ages.append(time.monotonic() - packet_received_at)
         control_dt = dt
         x = read_pose(packet)
-        dx_raw = estimate_tcp_speed(x)
+        dx_raw = estimate_tcp_speed(x, packet_received_at)
         dx = speed_filter.update(dx_raw)
         filtered_force = F_ext_filter.update(read_force(packet))
         F_ext = filtered_force - F_ext_comp
@@ -332,14 +353,16 @@ try:
             servo_stream.update_target(servo_values)
             servo_stream.raise_if_fault()
 
-        print(
-            "x_c",
-            [round(value, 4) for value in x_c],
-            "F_ext",
-            [round(value, 3) for value in F_ext],
-            end="\r",
-            flush=True,
-        )
+        if loop_start - last_status_print >= 0.1:
+            print(
+                "x_c",
+                [round(value, 4) for value in x_c],
+                "F_ext",
+                [round(value, 3) for value in F_ext],
+                end="\r",
+                flush=True,
+            )
+            last_status_print = loop_start
         next_tick += dt
         delay = next_tick - time.monotonic()
         if delay > 0.0:

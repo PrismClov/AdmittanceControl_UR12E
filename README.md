@@ -54,7 +54,7 @@ python3 admittance_control.py \
 ```
 
 - `30004` 线程持续读取并维护最新位姿和六维力，不再软件降采样。
-- 控制线程按 `--dt` 固定 20 ms 读取最新状态，不等待下一帧序号。
+- 控制线程启动时统计反馈周期中位数，并自动与其对齐。
 - `29999` 独立 ServoP 线程按 `--servo-period` 默认 30 ms 发送最新目标。
 - 独立应答线程解析 ServoP 回复并统计发送周期、RTT 和错误。
 
@@ -67,6 +67,7 @@ python3 admittance_control.py \
 - `ServoP` 前选择与当前欧拉角连续且矩阵等价的欧拉角分支，避免 Rx 在 ±180° 跳变
 - `--execute` 启动时若检测到上次遗留的碰撞状态，会先停止并清除该状态
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
+- `--dt`：显式指定控制周期；省略时自动采用实测反馈周期
 - `--servo-period`：ServoP 独立发送周期，默认 `0.03 s`
 - `--speed-filter-alpha`：TCP 速度低通系数，默认 `1.0`（关闭）
 - `--target-filter-alpha`：ServoP 目标位姿低通系数，默认 `1.0`（关闭）
