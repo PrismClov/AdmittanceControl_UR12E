@@ -94,6 +94,33 @@ python3 admittance_control.py \
 
 `--duration 0` 表示持续运行，按 `Ctrl+C` 停止。
 
+## 往返接触测试
+
+`roundtrip_admittance_test.py` 按以下顺序重复测试：
+
+```text
+障碍表面/当前位置 → A：纯导纳退开
+A → B：导纳接近并在稳定接触后切换到 5 N 恒力
+```
+
+默认只打印两条控制命令，不运动：
+
+```bash
+python3 roundtrip_admittance_test.py --cycles 1
+```
+
+确认安全后执行：
+
+```bash
+python3 roundtrip_admittance_test.py \
+  --cycles 1 \
+  --execute
+```
+
+脚本会分别保存 `to_A` 和 `to_B` 两段日志，并检查 B 段是否进入过
+`contact` 状态。默认 `--contact-release-after 0`，因此接触后不会自动
+释放，而是保持接触力直到该段结束。
+
 默认执行方式已经拆成三个独立环节：
 
 ```bash
