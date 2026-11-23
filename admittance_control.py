@@ -10,6 +10,11 @@ from scipy.spatial.transform import Rotation as R
 
 import filter_module
 from admittance_trajectory import AdmittanceTrajectory, TrajectoryLimits
+from tcp_diagnostics import (
+    AdmittanceDiagnosticsLogger,
+    ServoReplyTracker,
+    TcpVelocityEstimator,
+)
 
 
 parser = argparse.ArgumentParser(description="CR5 六维力导纳控制")
@@ -30,6 +35,11 @@ parser.add_argument("--duration", type=float, default=0.0, help="0 表示持续�
 parser.add_argument("--execute", action="store_true", help="默认只试运行，不发送 ServoP")
 parser.add_argument("--zero-sensor", action="store_true")
 parser.add_argument("--timing", action="store_true", help="打印控制周期统计")
+parser.add_argument(
+    "--log-csv",
+    type=Path,
+    help="将力、命令、实际位姿、速度和 ServoP 时序写入 CSV",
+)
 parser.add_argument(
     "--direct-tcp",
     action="store_true",
@@ -240,6 +250,7 @@ class LatestFeedback:
 
 
 direct_reply_buffer = ""
+servo_reply_tracker = ServoReplyTracker()
 
 
 def drain_direct_replies(raise_on_error=True):
@@ -265,8 +276,11 @@ def drain_direct_replies(raise_on_error=True):
 
     messages = direct_reply_buffer.split(";")
     direct_reply_buffer = messages.pop()
-    if raise_on_error:
-        for message in messages:
+    received_at = time.monotonic()
+    for message in messages:
+        if "ServoP(" in message:
+            servo_reply_tracker.mark_reply(received_at)
+        if raise_on_error:
             if message.strip() and parse_error_id(message) != 0:
                 raise RuntimeError(f"Direct ServoP failed: {message!r}")
 
@@ -401,6 +415,80 @@ previous_loop_start = None
 loop_intervals = []
 feedback_ages = []
 previous_feedback_timestamp = None
+actual_velocity_estimator = TcpVelocityEstimator()
+actual_pose_initialized = False
+log_fieldnames = (
+    "control_time_s",
+    "feedback_time_s",
+    "feedback_age_ms",
+    "control_dt_s",
+    "actual_dt_s",
+    "F_raw_x_N",
+    "F_filtered_x_N",
+    "F_ext_x_N",
+    "v_virtual_x_mps",
+    "v_actual_x_mps",
+    "a_actual_x_mps2",
+    "x_cmd_m",
+    "x_actual_m",
+    "x_cmd_minus_actual_m",
+    "F_raw_y_N",
+    "F_filtered_y_N",
+    "F_ext_y_N",
+    "v_virtual_y_mps",
+    "v_actual_y_mps",
+    "a_actual_y_mps2",
+    "y_cmd_m",
+    "y_actual_m",
+    "y_cmd_minus_actual_m",
+    "F_raw_z_N",
+    "F_filtered_z_N",
+    "F_ext_z_N",
+    "v_virtual_z_mps",
+    "v_actual_z_mps",
+    "a_actual_z_mps2",
+    "z_cmd_m",
+    "z_actual_m",
+    "z_cmd_minus_actual_m",
+    "F_raw_rx_Nm",
+    "F_filtered_rx_Nm",
+    "F_ext_rx_Nm",
+    "v_virtual_rx_radps",
+    "v_actual_rx_radps",
+    "a_actual_rx_radps2",
+    "rx_cmd_rad",
+    "rx_actual_rad",
+    "rx_cmd_minus_actual_rad",
+    "F_raw_ry_Nm",
+    "F_filtered_ry_Nm",
+    "F_ext_ry_Nm",
+    "v_virtual_ry_radps",
+    "v_actual_ry_radps",
+    "a_actual_ry_radps2",
+    "ry_cmd_rad",
+    "ry_actual_rad",
+    "ry_cmd_minus_actual_rad",
+    "F_raw_rz_Nm",
+    "F_filtered_rz_Nm",
+    "F_ext_rz_Nm",
+    "v_virtual_rz_radps",
+    "v_actual_rz_radps",
+    "a_actual_rz_radps2",
+    "rz_cmd_rad",
+    "rz_actual_rad",
+    "rz_cmd_minus_actual_rad",
+    "frozen",
+    "servo_sent",
+    "servo_send_time_s",
+    "servo_reply_time_s",
+    "servo_reply_latency_ms",
+    "servo_pending_replies",
+)
+diagnostics_logger = (
+    AdmittanceDiagnosticsLogger(args.log_csv, log_fieldnames)
+    if args.log_csv is not None
+    else None
+)
 try:
     while args.duration == 0.0 or time.monotonic() - started < args.duration:
         loop_start = time.monotonic()
@@ -412,21 +500,35 @@ try:
         )
         feedback_ages.append(time.monotonic() - packet_received_at)
         control_dt = dt
-        if args.sync_feedback:
-            feedback_timestamp = float(packet["TimeStamp"][0]) * 0.001
-            if (
-                previous_feedback_timestamp is not None
-                and feedback_timestamp > previous_feedback_timestamp
-            ):
-                control_dt = feedback_timestamp - previous_feedback_timestamp
-            previous_feedback_timestamp = feedback_timestamp
+        feedback_timestamp = float(packet["TimeStamp"][0]) * 0.001
+        feedback_dt = 0.0
+        if (
+            previous_feedback_timestamp is not None
+            and feedback_timestamp > previous_feedback_timestamp
+        ):
+            feedback_dt = feedback_timestamp - previous_feedback_timestamp
+            if args.sync_feedback:
+                control_dt = feedback_dt
+        previous_feedback_timestamp = feedback_timestamp
         x = read_pose(packet)
-        filtered_force = F_ext_filter.update(read_force(packet))
+        if not actual_pose_initialized:
+            actual_velocity_estimator.reset(x, feedback_timestamp)
+            actual_velocity, actual_acceleration = np.zeros(6), np.zeros(6)
+            actual_dt = 0.0
+            actual_pose_initialized = True
+        else:
+            actual_velocity, actual_acceleration, actual_dt = (
+                actual_velocity_estimator.update(x, feedback_timestamp)
+            )
+        raw_force = read_force(packet)
+        filtered_force = F_ext_filter.update(raw_force)
         F_ext = filtered_force - F_ext_comp
         ExternalForceComp(filtered_force, trajectory.velocity)
         trajectory_step = trajectory.step(x, F_ext, control_dt)
         x_c = trajectory_step.target_pose
         x_servo = x_c
+        servo_sent = False
+        servo_send_time = None
 
         if args.execute:
             servo_values = pose_for_servop(
@@ -434,25 +536,97 @@ try:
             )
             if args.direct_tcp:
                 drain_direct_replies()
+                servo_send_time = servo_reply_tracker.mark_sent()
                 servo_c.send_data(servo_p_command(servo_values, control_dt))
+                servo_sent = True
             else:
+                servo_send_time = servo_reply_tracker.mark_sent()
                 response = servo_c.ServoP(
                     *servo_values,
                     t=control_dt,
                     aheadtime=50,
                     gain=500,
                 )
+                servo_reply_tracker.mark_reply()
+                servo_sent = True
                 error = parse_error_id(response)
                 if error != 0:
                     raise RuntimeError(
                         f"ServoP failed with error {error}: {response!r}"
                     )
 
+        if diagnostics_logger is not None:
+            commanded_minus_actual = np.zeros(6)
+            commanded_minus_actual[:3] = x_c[:3] - x[:3]
+            commanded_minus_actual[3:] = (
+                R.from_rotvec(x_c[3:])
+                * R.from_rotvec(x[3:]).inv()
+            ).as_rotvec()
+            row = {
+                "control_time_s": loop_start - started,
+                "feedback_time_s": feedback_timestamp,
+                "feedback_age_ms": (
+                    time.monotonic() - packet_received_at
+                )
+                * 1000.0,
+                "control_dt_s": control_dt,
+                "actual_dt_s": actual_dt,
+                "frozen": int(trajectory_step.frozen),
+                "servo_sent": int(servo_sent),
+                "servo_send_time_s": (
+                    ""
+                    if servo_send_time is None
+                    else servo_send_time - started
+                ),
+                "servo_reply_time_s": (
+                    ""
+                    if servo_reply_tracker.last_reply_at is None
+                    else servo_reply_tracker.last_reply_at - started
+                ),
+                "servo_reply_latency_ms": (
+                    ""
+                    if servo_reply_tracker.last_latency_s is None
+                    else servo_reply_tracker.last_latency_s * 1000.0
+                ),
+                "servo_pending_replies": servo_reply_tracker.pending_count,
+            }
+            for index, axis in enumerate(
+                ("x", "y", "z", "rx", "ry", "rz")
+            ):
+                unit_force = "N" if index < 3 else "Nm"
+                unit_velocity = "mps" if index < 3 else "radps"
+                unit_acceleration = (
+                    "mps2" if index < 3 else "radps2"
+                )
+                unit_position = "m" if index < 3 else "rad"
+                row[f"F_raw_{axis}_{unit_force}"] = raw_force[index]
+                row[f"F_filtered_{axis}_{unit_force}"] = (
+                    filtered_force[index]
+                )
+                row[f"F_ext_{axis}_{unit_force}"] = F_ext[index]
+                row[f"v_virtual_{axis}_{unit_velocity}"] = (
+                    trajectory_step.velocity[index]
+                )
+                row[f"v_actual_{axis}_{unit_velocity}"] = (
+                    actual_velocity[index]
+                )
+                row[f"a_actual_{axis}_{unit_acceleration}"] = (
+                    actual_acceleration[index]
+                )
+                row[f"{axis}_cmd_{unit_position}"] = x_c[index]
+                row[f"{axis}_actual_{unit_position}"] = x[index]
+                row[f"{axis}_cmd_minus_actual_{unit_position}"] = (
+                    commanded_minus_actual[index]
+                )
+            diagnostics_logger.write(row)
+
         print(
             "x_c",
             [round(value, 4) for value in x_c],
             "F_ext",
             [round(value, 3) for value in F_ext],
+            "v_actual",
+            [round(value, 4) for value in actual_velocity],
             "tracking",
             [round(value, 4) for value in trajectory_step.tracking_error],
             "frozen=" + str(trajectory_step.frozen),
@@ -492,6 +666,19 @@ finally:
             f" p95_ms={np.percentile(ages_ms, 95):.3f}"
             f" max_ms={ages_ms.max():.3f}"
         )
+        if servo_reply_tracker.latencies:
+            reply_ms = np.asarray(servo_reply_tracker.latencies) * 1000.0
+            print(
+                "ServoP reply:"
+                f" samples={len(reply_ms)}"
+                f" mean_ms={reply_ms.mean():.3f}"
+                f" p95_ms={np.percentile(reply_ms, 95):.3f}"
+                f" max_ms={reply_ms.max():.3f}"
+                f" pending={servo_reply_tracker.pending_count}"
+            )
+    if diagnostics_logger is not None:
+        diagnostics_logger.close()
+        print(f"\nDiagnostics CSV: {diagnostics_logger.path}")
     rtde_c.close()
     feedback_reader.stop()
     rtde_recv.close()
