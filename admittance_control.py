@@ -138,6 +138,12 @@ parser.add_argument(
     type=Path,
     help="write six-axis admittance diagnostics to CSV",
 )
+parser.add_argument(
+    "--target-pose",
+    type=parse_six_axis_values,
+    metavar="X,Y,Z,RX,RY,RZ",
+    help="admittance target pose in mm and degrees",
+)
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
@@ -276,7 +282,17 @@ if args.execute:
 
 x_init = read_pose(packet)
 print(x_init)
-x_d = x_init
+if args.target_pose is None:
+    x_d = x_init
+else:
+    target_values = np.asarray(args.target_pose, dtype=float)
+    x_d = np.empty(6)
+    x_d[:3] = target_values[:3] / 1000.0
+    x_d[3:] = R.from_euler(
+        "xyz",
+        target_values[3:],
+        degrees=True,
+    ).as_rotvec()
 dx_d = [0, 0, 0, 0, 0, 0]
 ddx_d = [0, 0, 0, 0, 0, 0]
 F_d = [0, 0, 0, 0, 0, 0]
