@@ -88,7 +88,7 @@ python3 analyze_motion.py logs/A.csv logs/B.csv logs/C.csv \
 - `--metrics-csv`：记录六轴原始力、滤波力、导纳力、实际速度/加速度/Jerk、命令与实际位姿
 - 控制周期和 ServoP 发送周期互相独立，始终只发送最新导纳目标
 - 没有速度限幅、位姿限幅或循环看门狗
-- `ActualTCPForce` 转换为环境外力；用户坐标 Y、Ry 正向修正，Rx 反向修正
+- `ActualTCPForce` 按当前 TCP 姿态从 Tool 坐标系旋转到 User/Base 坐标系
 
 ## 其他文件
 
