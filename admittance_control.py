@@ -13,6 +13,29 @@ from motion_logger import MotionCsvLogger
 from realtime_pipeline import LatestRobotState, ServoPStream
 
 
+def parse_six_axis_values(text):
+    values = [float(value.strip()) for value in text.split(",")]
+    if len(values) != 6:
+        raise argparse.ArgumentTypeError("expected six comma-separated values")
+    if not np.all(np.isfinite(values)):
+        raise argparse.ArgumentTypeError("all values must be finite")
+    return values
+
+
+def positive_mass(text):
+    values = parse_six_axis_values(text)
+    if any(value <= 0.0 for value in values):
+        raise argparse.ArgumentTypeError("mass values must be positive")
+    return values
+
+
+def nonnegative_parameters(text):
+    values = parse_six_axis_values(text)
+    if any(value < 0.0 for value in values):
+        raise argparse.ArgumentTypeError("values must be non-negative")
+    return values
+
+
 parser = argparse.ArgumentParser(description="CR5 六维力导纳控制")
 parser.add_argument("--robot-ip", default="192.168.5.5")
 parser.add_argument(
@@ -45,6 +68,24 @@ parser.add_argument("--timing", action="store_true", help="打印控制周期统
 parser.add_argument("--speed-filter-alpha", type=float, default=1.0)
 parser.add_argument("--target-filter-alpha", type=float, default=1.0)
 parser.add_argument("--force-filter-alpha", type=float, default=0.35)
+parser.add_argument(
+    "--mass",
+    type=positive_mass,
+    default=[0.8, 0.8, 0.8, 0.01, 0.01, 0.01],
+    metavar="M1,...,M6",
+)
+parser.add_argument(
+    "--damping",
+    type=nonnegative_parameters,
+    default=[16, 16, 16, 0.12, 0.12, 0.16],
+    metavar="D1,...,D6",
+)
+parser.add_argument(
+    "--stiffness",
+    type=nonnegative_parameters,
+    default=[80, 80, 80, 1.1, 1.1, 2],
+    metavar="K1,...,K6",
+)
 parser.add_argument(
     "--metrics-csv",
     type=Path,
@@ -218,6 +259,10 @@ target_filter = filter_module.RCLowPassFilter(
     alpha=args.target_filter_alpha,
     initial_value=x_init,
 )
+target_rotation_filter = filter_module.RotationLowPassFilter(
+    alpha=args.target_filter_alpha,
+    initial_value=x_init[3:],
+)
 log_axes = ("x", "y", "z", "rx", "ry", "rz")
 metric_fields = [
     "time_s",
@@ -272,9 +317,9 @@ print(
 print(f"Control period: {dt * 1000.0:.3f} ms ({1.0 / dt:.3f} Hz)")
 
 # 设计导纳控制参数
-M = [0.8, 0.8, 0.8, 0.01, 0.01, 0.01]
-D = [16, 16, 16, 0.12, 0.12, 0.16]
-K = [80, 80, 80, 1.1, 1.1, 2]
+M = args.mass
+D = args.damping
+K = args.stiffness
 Deadband = [1.5, 1.5, 1.5, 0.015, 0.05, 0.3]
 
 # 零漂更新只在小残差、低速和低角速度时进行。
@@ -435,7 +480,10 @@ try:
             dx,
             F_ext,
         )
-        x_servo = target_filter.update(x_c)
+        filtered_target = target_filter.update(x_c)
+        x_servo = np.asarray(x_c, dtype=float).copy()
+        x_servo[:3] = filtered_target[:3]
+        x_servo[3:] = target_rotation_filter.update(x_c[3:])
 
         if args.execute:
             servo_values = pose_for_servop(

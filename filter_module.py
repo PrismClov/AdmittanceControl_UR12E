@@ -1,6 +1,7 @@
 import numpy as np
 from collections import deque
 import time
+from scipy.spatial.transform import Rotation as R
 
 
 class MoveMeanFilter:
@@ -82,6 +83,33 @@ class RCLowPassFilter:
         self.last_output = filtered.copy()
 
         return filtered
+
+
+class RotationLowPassFilter:
+    """Low-pass rotation updates along the shortest geodesic path."""
+
+    def __init__(self, alpha=0.5, initial_value=None):
+        if not 0.0 < alpha <= 1.0:
+            raise ValueError("alpha must be in (0, 1]")
+        self.alpha = float(alpha)
+        initial = np.zeros(3) if initial_value is None else np.asarray(
+            initial_value,
+            dtype=float,
+        )
+        if initial.shape != (3,):
+            raise ValueError("initial_value must contain a rotation vector")
+        self.last_output = R.from_rotvec(initial)
+
+    def update(self, current_input):
+        current = np.asarray(current_input, dtype=float)
+        if current.shape != (3,):
+            raise ValueError("current_input must contain a rotation vector")
+        desired = R.from_rotvec(current)
+        delta = (desired * self.last_output.inv()).as_rotvec()
+        self.last_output = (
+            R.from_rotvec(self.alpha * delta) * self.last_output
+        )
+        return self.last_output.as_rotvec()
 
 
 class KalmanFilter:
