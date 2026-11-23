@@ -69,31 +69,9 @@ python3 admittance_control.py \
   --timing
 ```
 
-采集力、命令、实际位姿、实际速度和 ServoP 时序诊断：
-
-```bash
-python3 admittance_control.py \
-  --robot-ip 192.168.5.5 \
-  --duration 5 \
-  --log-csv logs/admittance_diagnostics.csv
-```
-
-该命令默认只读，不发送运动。CSV 同时包含完整六维的原始力、滤波力、
-导纳输入力、虚拟速度、实际速度、实际加速度、命令位姿、实际位姿及
-目标跟踪差；X 轴字段可直接用于绘制 `F_ext_x`、`v_virtual_x`、
-`v_actual_x` 和 `x_cmd_minus_actual_x`。
-
-直接 TCP 模式的回复时间是在后续控制周期非阻塞读取的，因此
-`servo_reply_latency_ms` 是应用层可观测延迟，分辨率和采样周期约 20 ms；
-`servo_pending_replies` 持续大于 1 才表示回复队列开始积压。
-
 ## 控制说明
 
 - 原导纳公式和 `M/D/K/Deadband` 参数保持不变
-- 速度式导纳输出经过速度、加速度和 Jerk 约束后再积分
-- 位置与 SO(3) 姿态使用同一约束速度生成连续目标
-- 限幅后的实际命令速度写回轨迹状态，避免内部积分饱和
-- 编码器反馈与命令跟踪误差超过门限时冻结轨迹推进
 - 力偏置使用小步长残差更新，仅在六轴速度低于门限时执行
 - 角速度由相邻位姿的 `R_current @ R_previous.T` 计算
 - 输出姿态使用与左乘姿态增量一致的旋转向量
@@ -101,17 +79,13 @@ python3 admittance_control.py \
 - `--execute` 启动时若检测到上次遗留的碰撞状态，会先停止并清除该状态
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
 - `--direct-tcp`：固定周期直接写 Dashboard TCP，不等待当前 `ServoP` 回包
-- `--max-linear-velocity` / `--max-angular-velocity`：默认 `0.05 m/s` / `0.2 rad/s`
-- `--max-linear-acceleration` / `--max-angular-acceleration`：默认 `0.5 m/s²` / `1.5 rad/s²`
-- `--max-linear-jerk` / `--max-angular-jerk`：默认 `10.0 m/s³` / `30.0 rad/s³`
-- `--max-tracking-translation` / `--max-tracking-rotation`：默认 `0.02 m` / `0.10 rad`
-- 外力释放且接近初始位姿、速度足够小时，轨迹显式落零以避免残余来回小运动
+- `--speed-filter-alpha`：TCP 速度低通系数，默认 `1.0`（关闭）
+- `--target-filter-alpha`：ServoP 目标位姿低通系数，默认 `1.0`（关闭）
 - `--sync-feedback`：每帧六维力触发一次控制，按反馈时间戳计算 `dt`
 - `--feedback-hz`：六维力软件输出频率，默认 `50 Hz`
-- `--log-csv`：输出完整诊断 CSV；未指定时不写文件
 - 默认固定频率模式会后台持续读取反馈，每次控制只使用最新一帧，避免旧包积压
 - 硬件反馈流仍以约 `122 Hz` 到达，`--feedback-hz 50` 是软件降采样
-- 速度、加速度和 Jerk 只由轨迹层约束，没有额外的控制器级看门狗
+- 没有速度限幅、位姿限幅或循环看门狗
 - `ActualTCPForce` 转换为环境外力；用户坐标 Y、Ry 正向修正，Rx 反向修正
 
 ## 其他文件
