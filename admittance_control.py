@@ -10,6 +10,7 @@ from scipy.spatial.transform import Rotation as R
 import filter_module
 from force_transform import wrench_tool_to_user
 from motion_logger import MotionCsvLogger
+from motion_limits import CartesianVelocityAccelerationLimiter, integrate_velocity
 from realtime_pipeline import LatestRobotState, ServoPStream
 
 
@@ -85,6 +86,24 @@ parser.add_argument(
     type=nonnegative_parameters,
     default=[80, 80, 80, 1.1, 1.1, 2],
     metavar="K1,...,K6",
+)
+parser.add_argument(
+    "--tcp-max-velocity",
+    "--max-velocity",
+    dest="tcp_max_velocity",
+    type=nonnegative_parameters,
+    default=[0.15, 0.15, 0.15, 0.5, 0.5, 0.5],
+    metavar="V1,...,V6",
+    help="six-axis TCP velocity limit in m/s and rad/s",
+)
+parser.add_argument(
+    "--tcp-max-acceleration",
+    "--max-acceleration",
+    dest="tcp_max_acceleration",
+    type=nonnegative_parameters,
+    default=[0.8, 0.8, 0.8, 1.5, 1.5, 1.5],
+    metavar="A1,...,A6",
+    help="six-axis TCP acceleration limit in m/s^2 and rad/s^2",
 )
 parser.add_argument(
     "--metrics-csv",
@@ -321,6 +340,11 @@ M = args.mass
 D = args.damping
 K = args.stiffness
 Deadband = [1.5, 1.5, 1.5, 0.015, 0.05, 0.3]
+motion_limiter = CartesianVelocityAccelerationLimiter(
+    args.tcp_max_velocity,
+    args.tcp_max_acceleration,
+    dt,
+)
 
 # 零漂更新只在小残差、低速和低角速度时进行。
 BiasUpdateBeta = 0.001
@@ -400,7 +424,7 @@ def admittance_control(M, D, K, dt, x, dx, F_ext):
 
     x_c[0:3] = np.array(x[0:3]) + np.array(deltax_c[0:3])
     x_c[3:6] = (R.from_rotvec(deltax_c[3:6]) * rot_x).as_rotvec()
-    return x_c, ddx_c
+    return x_c, ddx_c, np.asarray(dx_c, dtype=float)
 
 
 def ExternalForceComp(filtered_force, speed):
@@ -471,7 +495,7 @@ try:
         filtered_force = F_ext_filter.update(read_force(packet))
         F_ext = filtered_force - F_ext_comp
         ExternalForceComp(filtered_force, dx_raw)
-        x_c, a_admittance_raw = admittance_control(
+        _, a_admittance_raw, v_admittance_raw = admittance_control(
             M,
             D,
             K,
@@ -480,6 +504,8 @@ try:
             dx,
             F_ext,
         )
+        v_admittance_limited = motion_limiter.update(v_admittance_raw)
+        x_c = integrate_velocity(x, v_admittance_limited, control_dt)
         filtered_target = target_filter.update(x_c)
         x_servo = np.asarray(x_c, dtype=float).copy()
         x_servo[:3] = filtered_target[:3]

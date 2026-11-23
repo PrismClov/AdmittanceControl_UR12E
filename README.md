@@ -37,11 +37,12 @@ python3 admittance_control.py \
 本仓库是独立的最小试验副本，基于原始 CR5 导纳控制，不包含速度导纳、
 KF 力估计、jerk 限幅、关节空间控制或自定义轨迹复刻。
 
-相对原始控制只做了两处改动：
+相对原始控制只做了以下改动：
 
 - 姿态目标低通改为四元数最短路径插值，避免旋转向量跨 `+pi/-pi`
   时走长路径并生成异常 `ServoP` 目标。
 - 增加 `--mass`、`--damping`、`--stiffness` 三个六轴参数入口。
+- 对导纳生成的 TCP 目标速度增加六轴速度和加速度限制。
 
 默认参数与当前原始仓库一致：
 
@@ -55,6 +56,22 @@ K = 80,80,80,1.1,1.1,2
 
 ```bash
 --damping "8,8,8,0.006,0.006,0.005"
+```
+
+速度和加速度默认限制：
+
+```text
+线速度     0.15 m/s
+角速度     0.50 rad/s
+线加速度   0.8 m/s^2
+角加速度   1.5 rad/s^2
+```
+
+只有速度和加速度限制，没有 jerk 限制：
+
+```bash
+--tcp-max-velocity "0.15,0.15,0.15,0.5,0.5,0.5" \
+--tcp-max-acceleration "0.8,0.8,0.8,1.5,1.5,1.5"
 ```
 
 ## 执行
@@ -110,9 +127,11 @@ python3 analyze_motion.py logs/A.csv logs/B.csv logs/C.csv \
 - `--force-filter-alpha`：六维力低通系数，默认 `0.35`
 - `--speed-filter-alpha`：TCP 速度低通系数，默认 `1.0`（关闭）
 - `--target-filter-alpha`：ServoP 目标位姿低通系数，默认 `1.0`（关闭）
+- `--tcp-max-velocity`：六轴目标速度上限；默认线速度 `0.15 m/s`、角速度 `0.5 rad/s`
+- `--tcp-max-acceleration`：六轴目标加速度上限；默认线加速度 `0.8 m/s^2`、角加速度 `1.5 rad/s^2`
 - `--metrics-csv`：记录六轴原始力、滤波力、导纳力、实际速度/加速度/Jerk、命令与实际位姿
 - 控制周期和 ServoP 发送周期互相独立，始终只发送最新导纳目标
-- 没有速度限幅、位姿限幅或循环看门狗
+- 只限制速度与加速度，没有 jerk、位姿幅值或循环看门狗限制
 - `ActualTCPForce` 按当前 TCP 姿态从 Tool 坐标系旋转到 User/Base 坐标系
 
 ## 其他文件
