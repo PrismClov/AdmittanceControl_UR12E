@@ -63,6 +63,20 @@ def load_sdk(path):
     return module
 
 
+def require_connected_socket(sock, host, port, name):
+    try:
+        peer = sock.getpeername()
+    except (AttributeError, OSError) as exc:
+        raise ConnectionError(
+            f"{name} is unreachable at {host}:{port}; "
+            "check controller power, Ethernet cable and IP address"
+        ) from exc
+    if peer[0] != host or peer[1] != port:
+        raise ConnectionError(
+            f"{name} connected to unexpected endpoint {peer}, expected {host}:{port}"
+        )
+
+
 def parse_error_id(response):
     if response is None or not str(response).strip():
         return 0
@@ -121,8 +135,8 @@ sdk = load_sdk(args.sdk)
 rtde_c = sdk.DobotApiDashboard(args.robot_ip, 29999)
 servo_c = rtde_c
 rtde_recv = sdk.DobotApiFeedBack(args.robot_ip, 30004)
-if not rtde_recv.socket_dobot:
-    raise ConnectionError(f"无法连接 CR5 反馈端口 {args.robot_ip}:30004")
+require_connected_socket(rtde_c.socket_dobot, args.robot_ip, 29999, "CR5 dashboard")
+require_connected_socket(rtde_recv.socket_dobot, args.robot_ip, 30004, "CR5 feedback")
 
 
 def get_packet():
