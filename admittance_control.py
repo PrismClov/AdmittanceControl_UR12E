@@ -8,7 +8,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 import filter_module
-from contact_monitor import ContactHold
+from contact_monitor import ContactForceController
 from force_processing import continuous_deadband
 from force_transform import wrench_tool_to_user
 from motion_logger import MotionCsvLogger
@@ -149,7 +149,26 @@ parser.add_argument(
     "--contact-stop-force",
     type=float,
     default=5.0,
-    help="latch target motion after external force magnitude in N",
+    help="activate contact force control after external force magnitude in N",
+)
+parser.add_argument(
+    "--contact-target-force",
+    type=float,
+    default=5.0,
+    help="regulated normal contact force in N",
+)
+parser.add_argument("--contact-kp", type=float, default=0.001)
+parser.add_argument("--contact-ki", type=float, default=0.0001)
+parser.add_argument(
+    "--contact-force-deadband",
+    type=float,
+    default=0.25,
+)
+parser.add_argument(
+    "--contact-max-velocity",
+    type=float,
+    default=0.01,
+    help="maximum contact correction velocity in m/s",
 )
 args = parser.parse_args()
 if args.dt <= 0.0:
@@ -168,6 +187,14 @@ if args.duration < 0.0:
     parser.error("--duration must be non-negative")
 if args.contact_stop_force <= 0.0:
     parser.error("--contact-stop-force must be positive")
+if args.contact_target_force <= 0.0:
+    parser.error("--contact-target-force must be positive")
+if args.contact_kp < 0.0 or args.contact_ki < 0.0:
+    parser.error("contact gains must be non-negative")
+if args.contact_force_deadband < 0.0:
+    parser.error("--contact-force-deadband must be non-negative")
+if args.contact_max_velocity <= 0.0:
+    parser.error("--contact-max-velocity must be positive")
 if not args.sdk.is_file():
     parser.error(f"Dobot SDK not found: {args.sdk}")
 
@@ -355,6 +382,8 @@ metric_fields = [
     "servo_rtt_ms",
     "contact_hold",
     "contact_force_n",
+    "contact_error_n",
+    "contact_velocity",
 ]
 for axis in log_axes:
     metric_fields.extend(
@@ -415,7 +444,15 @@ motion_limiter = CartesianVelocityAccelerationLimiter(
     dt,
 )
 contact_monitor = (
-    ContactHold(args.contact_stop_force)
+    ContactForceController(
+        detect_force_n=args.contact_stop_force,
+        target_force_n=args.contact_target_force,
+        kp=args.contact_kp,
+        ki=args.contact_ki,
+        deadband_n=args.contact_force_deadband,
+        max_velocity_m_s=args.contact_max_velocity,
+        dt=dt,
+    )
     if args.target_pose is not None
     else None
 )
@@ -575,15 +612,19 @@ try:
         filtered_force = F_ext_filter.update(read_force(packet))
         F_ext = filtered_force - F_ext_comp
         ExternalForceComp(filtered_force, dx_raw)
-        contact_hold = (
-            contact_monitor.update(F_ext)
-            if contact_monitor is not None
-            else False
-        )
+        if contact_monitor is not None:
+            contact_hold, contact_velocity, contact_force = (
+                contact_monitor.update(F_ext)
+            )
+        else:
+            contact_hold = False
+            contact_velocity = np.zeros(6)
+            contact_force = 0.0
         if contact_hold and not contact_notice_printed:
             print(
-                "\nContact detected: holding target at current pose, "
-                f"force={contact_monitor.detected_force_n:.3f} N"
+                "\nContact detected: regulating normal force, "
+                f"force={contact_monitor.detected_force_n:.3f} N, "
+                f"target={args.contact_target_force:.3f} N"
             )
             contact_notice_printed = True
         (
@@ -602,7 +643,7 @@ try:
             F_ext,
         )
         requested_velocity = (
-            np.zeros(6) if contact_hold else v_admittance_raw
+            contact_velocity if contact_hold else v_admittance_raw
         )
         v_admittance_limited = motion_limiter.update(requested_velocity)
         a_admittance_limited = motion_limiter.last_acceleration
@@ -652,7 +693,15 @@ try:
                 ),
                 "contact_hold": int(contact_hold),
                 "contact_force_n": (
-                    float(np.linalg.norm(F_ext[:3]))
+                    float(contact_force) if contact_hold else 0.0
+                ),
+                "contact_error_n": (
+                    float(contact_force - args.contact_target_force)
+                    if contact_hold
+                    else 0.0
+                ),
+                "contact_velocity": (
+                    float(np.linalg.norm(contact_velocity[:3]))
                     if contact_hold
                     else 0.0
                 ),
