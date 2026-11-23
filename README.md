@@ -43,31 +43,20 @@ python3 admittance_control.py \
 
 `--duration 0` 表示持续运行，按 `Ctrl+C` 停止。
 
-固定周期直发 `ServoP`：
+默认执行方式已经拆成三个独立环节：
 
 ```bash
 python3 admittance_control.py \
   --robot-ip 192.168.5.5 \
   --duration 0 \
   --execute \
-  --direct-tcp \
   --timing
 ```
 
-直发模式复用唯一的 `29999` TCP 控制连接，不在当前控制周期等待 `ServoP` 回包；
-已完成的回包会在后续周期非阻塞读取并检查错误。
-
-按六维力反馈帧同步控制：
-
-```bash
-python3 admittance_control.py \
-  --robot-ip 192.168.5.5 \
-  --duration 10 \
-  --execute \
-  --direct-tcp \
-  --sync-feedback \
-  --timing
-```
+- `30004` 线程持续读取并维护最新位姿和六维力，不再软件降采样。
+- 控制线程按 `--dt` 固定 20 ms 读取最新状态，不等待下一帧序号。
+- `29999` 独立 ServoP 线程按 `--servo-period` 默认 30 ms 发送最新目标。
+- 独立应答线程解析 ServoP 回复并统计发送周期、RTT 和错误。
 
 ## 控制说明
 
@@ -78,13 +67,10 @@ python3 admittance_control.py \
 - `ServoP` 前选择与当前欧拉角连续且矩阵等价的欧拉角分支，避免 Rx 在 ±180° 跳变
 - `--execute` 启动时若检测到上次遗留的碰撞状态，会先停止并清除该状态
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
-- `--direct-tcp`：固定周期直接写 Dashboard TCP，不等待当前 `ServoP` 回包
+- `--servo-period`：ServoP 独立发送周期，默认 `0.03 s`
 - `--speed-filter-alpha`：TCP 速度低通系数，默认 `1.0`（关闭）
 - `--target-filter-alpha`：ServoP 目标位姿低通系数，默认 `1.0`（关闭）
-- `--sync-feedback`：每帧六维力触发一次控制，按反馈时间戳计算 `dt`
-- `--feedback-hz`：六维力软件输出频率，默认 `50 Hz`
-- 默认固定频率模式会后台持续读取反馈，每次控制只使用最新一帧，避免旧包积压
-- 硬件反馈流仍以约 `122 Hz` 到达，`--feedback-hz 50` 是软件降采样
+- 控制周期和 ServoP 发送周期互相独立，始终只发送最新导纳目标
 - 没有速度限幅、位姿限幅或循环看门狗
 - `ActualTCPForce` 转换为环境外力；用户坐标 Y、Ry 正向修正，Rx 反向修正
 

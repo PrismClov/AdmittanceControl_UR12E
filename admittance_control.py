@@ -2,13 +2,13 @@ import argparse
 import importlib.util
 from pathlib import Path
 import re
-import threading
 import time
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 import filter_module
+from realtime_pipeline import LatestRobotState, ServoPStream
 
 
 parser = argparse.ArgumentParser(description="CR5 六维力导纳控制")
@@ -20,32 +20,22 @@ parser.add_argument(
 )
 parser.add_argument("--dt", type=float, default=0.02)
 parser.add_argument(
-    "--feedback-hz",
+    "--servo-period",
     type=float,
-    default=50.0,
-    help="software output rate for force samples",
+    default=0.03,
+    help="independent ServoP send period in seconds",
 )
 parser.add_argument("--duration", type=float, default=0.0, help="0 表示持续运行")
 parser.add_argument("--execute", action="store_true", help="默认只试运行，不发送 ServoP")
 parser.add_argument("--zero-sensor", action="store_true")
 parser.add_argument("--timing", action="store_true", help="打印控制周期统计")
-parser.add_argument(
-    "--direct-tcp",
-    action="store_true",
-    help="固定周期直接发送 ServoP，不等待当前命令回包",
-)
-parser.add_argument(
-    "--sync-feedback",
-    action="store_true",
-    help="每收到一帧六维力反馈执行一次控制，并将反馈 dt 用于导纳积分",
-)
 parser.add_argument("--speed-filter-alpha", type=float, default=1.0)
 parser.add_argument("--target-filter-alpha", type=float, default=1.0)
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
-if args.feedback_hz <= 0.0:
-    parser.error("--feedback-hz must be positive")
+if args.servo_period <= 0.0:
+    parser.error("--servo-period must be positive")
 if not 0.0 < args.speed_filter_alpha <= 1.0:
     parser.error("--speed-filter-alpha must be in (0, 1]")
 if not 0.0 < args.target_filter_alpha <= 1.0:
@@ -122,145 +112,17 @@ def pose_for_servop(pose, reference_rpy_degrees):
     return values
 
 
-def servo_p_command(values, dt, aheadtime=50, gain=500):
-    return (
-        "ServoP("
-        f"{values[0]:.6f},{values[1]:.6f},{values[2]:.6f},"
-        f"{values[3]:.6f},{values[4]:.6f},{values[5]:.6f},"
-        f"t={dt:.6f},aheadtime={aheadtime:.6f},gain={gain:.6f})"
-    )
-
-
 sdk = load_sdk(args.sdk)
 rtde_c = sdk.DobotApiDashboard(args.robot_ip, 29999)
-servo_c = rtde_c
 rtde_recv = sdk.DobotApiFeedBack(args.robot_ip, 30004)
 require_connected_socket(rtde_c.socket_dobot, args.robot_ip, 29999, "CR5 dashboard")
 require_connected_socket(rtde_recv.socket_dobot, args.robot_ip, 30004, "CR5 feedback")
 
-
-def get_packet():
-    packet = rtde_recv.feedBackData()
-    if packet is None:
-        raise RuntimeError("CR5 反馈包缺失")
-    return packet
-
-
-class LatestFeedback:
-    """Continuously drain force packets and expose only the newest one."""
-
-    def __init__(self, feedback, feedback_hz):
-        self._feedback = feedback
-        self._period = 1.0 / feedback_hz
-        self._condition = threading.Condition()
-        self._packet = None
-        self._sequence = 0
-        self._received_at = None
-        self._error = None
-        self._stop = threading.Event()
-        self._thread = threading.Thread(
-            target=self._run, name="cr5-force-feedback", daemon=True
-        )
-
-    def start(self):
-        self._thread.start()
-
-    def stop(self):
-        self._stop.set()
-        with self._condition:
-            self._condition.notify_all()
-        self._thread.join(timeout=1.0)
-
-    def _run(self):
-        next_publish = time.monotonic()
-        pending_packet = None
-        while not self._stop.is_set():
-            try:
-                packet = get_packet()
-            except Exception as exc:
-                with self._condition:
-                    self._error = exc
-                    self._condition.notify_all()
-                self._stop.wait(0.05)
-                continue
-            pending_packet = packet
-            now = time.monotonic()
-            if now < next_publish:
-                continue
-            with self._condition:
-                self._packet = pending_packet
-                self._sequence += 1
-                self._received_at = now
-                self._error = None
-                self._condition.notify_all()
-            next_publish = max(next_publish + self._period, now)
-
-    def get_latest(self, after_sequence=None, timeout=1.0):
-        with self._condition:
-            if after_sequence is not None:
-                self._condition.wait_for(
-                    lambda: self._sequence > after_sequence
-                    or self._error is not None
-                    or self._stop.is_set(),
-                    timeout=timeout,
-                )
-            else:
-                self._condition.wait_for(
-                    lambda: self._packet is not None
-                    or self._error is not None
-                    or self._stop.is_set(),
-                    timeout=timeout,
-                )
-            if self._error is not None:
-                raise RuntimeError(f"CR5 feedback error: {self._error}")
-            if self._packet is None or (
-                after_sequence is not None and self._sequence <= after_sequence
-            ):
-                raise TimeoutError("timed out waiting for a new CR5 feedback packet")
-            return (
-                self._packet,
-                self._sequence,
-                self._received_at,
-            )
-
-
-direct_reply_buffer = ""
-
-
-def drain_direct_replies(raise_on_error=True):
-    """Drain completed replies without waiting for the current ServoP."""
-
-    global direct_reply_buffer
-    if not args.direct_tcp:
-        return
-    sock = servo_c.socket_dobot
-    old_timeout = sock.gettimeout()
-    try:
-        sock.setblocking(False)
-        while True:
-            try:
-                chunk = sock.recv(4096)
-            except BlockingIOError:
-                break
-            if not chunk:
-                break
-            direct_reply_buffer += chunk.decode(errors="replace")
-    finally:
-        sock.settimeout(old_timeout)
-
-    messages = direct_reply_buffer.split(";")
-    direct_reply_buffer = messages.pop()
-    if raise_on_error:
-        for message in messages:
-            if message.strip() and parse_error_id(message) != 0:
-                raise RuntimeError(f"Direct ServoP failed: {message!r}")
-
-
-feedback_reader = LatestFeedback(rtde_recv, args.feedback_hz)
+feedback_reader = LatestRobotState(rtde_recv)
 feedback_reader.start()
 
 # 当前 TCP 位姿作为初始位姿，不额外发送初始运动。
-packet, feedback_sequence, packet_received_at = feedback_reader.get_latest()
+packet, feedback_sequence, packet_received_at = feedback_reader.wait_for_data()
 if args.execute:
     if int(packet["RobotMode"][0]) == 9:
         error_id = rtde_c.GetErrorID()
@@ -272,7 +134,7 @@ if args.execute:
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             packet, feedback_sequence, packet_received_at = (
-                feedback_reader.get_latest(after_sequence=feedback_sequence)
+                feedback_reader.snapshot()
             )
             if int(packet["RobotMode"][0]) != 11:
                 break
@@ -286,7 +148,7 @@ if args.execute:
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             packet, feedback_sequence, packet_received_at = (
-                feedback_reader.get_latest(after_sequence=feedback_sequence)
+                feedback_reader.snapshot()
             )
             if int(packet["EnableStatus"][0]) == 1:
                 break
@@ -314,9 +176,8 @@ if args.zero_sensor:
 """
 comp_filter = filter_module.MoveMeanFilter(window_size=15)
 for i in range(100):
-    packet, feedback_sequence, packet_received_at = (
-        feedback_reader.get_latest(after_sequence=feedback_sequence)
-    )
+    time.sleep(0.02)
+    packet, feedback_sequence, packet_received_at = feedback_reader.snapshot()
     F_ext_comp = comp_filter.update(read_force(packet))
 
 """
@@ -431,32 +292,30 @@ def ExternalForceComp(filtered_force, speed):
             F_ext_comp[i] += BiasUpdateBeta * residual[i]
 
 
+servo_stream = None
+if args.execute:
+    servo_stream = ServoPStream(
+        rtde_c.socket_dobot,
+        period_s=args.servo_period,
+    )
+    servo_stream.start()
+
+
 print("Start", "execute=" + str(args.execute))
 started = time.monotonic()
 next_tick = started
 previous_loop_start = None
 loop_intervals = []
 feedback_ages = []
-previous_feedback_timestamp = None
 try:
     while args.duration == 0.0 or time.monotonic() - started < args.duration:
         loop_start = time.monotonic()
         if previous_loop_start is not None:
             loop_intervals.append(loop_start - previous_loop_start)
         previous_loop_start = loop_start
-        packet, feedback_sequence, packet_received_at = (
-            feedback_reader.get_latest(after_sequence=feedback_sequence)
-        )
+        packet, feedback_sequence, packet_received_at = feedback_reader.snapshot()
         feedback_ages.append(time.monotonic() - packet_received_at)
         control_dt = dt
-        if args.sync_feedback:
-            feedback_timestamp = float(packet["TimeStamp"][0]) * 0.001
-            if (
-                previous_feedback_timestamp is not None
-                and feedback_timestamp > previous_feedback_timestamp
-            ):
-                control_dt = feedback_timestamp - previous_feedback_timestamp
-            previous_feedback_timestamp = feedback_timestamp
         x = read_pose(packet)
         dx_raw = estimate_tcp_speed(x)
         dx = speed_filter.update(dx_raw)
@@ -470,21 +329,8 @@ try:
             servo_values = pose_for_servop(
                 x_servo, packet["ToolVectorActual"][0][3:]
             )
-            if args.direct_tcp:
-                drain_direct_replies()
-                servo_c.send_data(servo_p_command(servo_values, control_dt))
-            else:
-                response = servo_c.ServoP(
-                    *servo_values,
-                    t=control_dt,
-                    aheadtime=50,
-                    gain=500,
-                )
-                error = parse_error_id(response)
-                if error != 0:
-                    raise RuntimeError(
-                        f"ServoP failed with error {error}: {response!r}"
-                    )
+            servo_stream.update_target(servo_values)
+            servo_stream.raise_if_fault()
 
         print(
             "x_c",
@@ -494,20 +340,17 @@ try:
             end="\r",
             flush=True,
         )
-        if not args.sync_feedback:
-            next_tick += dt
-            delay = next_tick - time.monotonic()
-            if delay > 0.0:
-                time.sleep(delay)
-            else:
-                next_tick = time.monotonic()
+        next_tick += dt
+        delay = next_tick - time.monotonic()
+        if delay > 0.0:
+            time.sleep(delay)
+        else:
+            next_tick = time.monotonic()
 except KeyboardInterrupt:
     print("\nInterrupted")
 finally:
-    if args.execute:
-        if args.direct_tcp:
-            drain_direct_replies(raise_on_error=False)
-        rtde_c.Stop()
+    if servo_stream is not None:
+        servo_stream.stop()
     if args.timing and loop_intervals:
         intervals_ms = np.asarray(loop_intervals) * 1000.0
         print(
@@ -527,6 +370,26 @@ finally:
             f" p95_ms={np.percentile(ages_ms, 95):.3f}"
             f" max_ms={ages_ms.max():.3f}"
         )
+        if servo_stream is not None:
+            send_ms = np.asarray(servo_stream.send_intervals) * 1000.0
+            rtt_ms = np.asarray(servo_stream.reply_latencies) * 1000.0
+            if send_ms.size:
+                print(
+                    "ServoP send:"
+                    f" samples={send_ms.size + 1}"
+                    f" mean_ms={send_ms.mean():.3f}"
+                    f" p95_ms={np.percentile(send_ms, 95):.3f}"
+                    f" max_ms={send_ms.max():.3f}"
+                )
+            if rtt_ms.size:
+                print(
+                    "ServoP RTT:"
+                    f" samples={rtt_ms.size}"
+                    f" mean_ms={rtt_ms.mean():.3f}"
+                    f" p95_ms={np.percentile(rtt_ms, 95):.3f}"
+                    f" max_ms={rtt_ms.max():.3f}"
+                    f" unknown_replies={servo_stream.unknown_reply_count}"
+                )
     rtde_c.close()
     feedback_reader.stop()
     rtde_recv.close()
