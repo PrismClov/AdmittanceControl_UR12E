@@ -4,9 +4,10 @@
 
 ## 接口
 
-- `192.168.5.5:30004`：读取 `ToolVectorActual` 和 `ActualTCPForce`
-- `192.168.5.5:29999`：发送 `ServoP`，退出时发送 `Stop`
-- `SixForceHome()`：由 `--zero-sensor` 显式触发
+- `/dobot_bringup_ros2/msg/FeedInfo`：读取位姿、关节和六维力
+- `/dobot_bringup_ros2/srv/InverseKin`、`ServoJ`：ROS 2 控制服务
+- `ServoP` 兼容模式仍直接使用 `192.168.5.5:29999`
+- `SixForceHome`：由 `--zero-sensor` 显式触发
 
 默认使用仓库内由跃疆 SDK 同步的文件：
 
@@ -54,6 +55,45 @@ python3 admittance_control.py \
   --timing
 ```
 
+默认运动接口通过 Dobot ROS 2 驱动调用 `InverseKin + ServoJ`。控制循环
+保持 50 Hz；ROS 2 命令使用单一在途请求，忙时只保留最新目标，不排队：
+
+启动 ROS 2 驱动：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/orin/dobot_ws/install/setup.bash
+
+IP_address=192.168.5.5 DOBOT_TYPE=cr5 \
+  ros2 launch dobot_bringup_v4 dobot_bringup_ros2.launch.py
+```
+
+另一个终端启动导纳控制：
+
+```bash
+python3 admittance_control.py \
+  --robot-ip 192.168.5.5 \
+  --duration 10 \
+  --execute \
+  --timing
+```
+
+临时切回 `ServoP`：
+
+```bash
+python3 admittance_control.py \
+  --robot-ip 192.168.5.5 \
+  --duration 10 \
+  --execute \
+  --servo-command p \
+  --direct-tcp \
+  --timing
+```
+
+`ServoJ` 使用当前反馈关节作为 `JointNear`，并检查逆解关节是否发生大范围跳变。
+六维力、位姿和关节反馈均从 ROS 2 `FeedInfo` 话题读取。
+该模式不能与 `--direct-tcp` 同时使用。
+
 直发模式复用唯一的 `29999` TCP 控制连接，不在当前控制周期等待 `ServoP` 回包；
 已完成的回包会在后续周期非阻塞读取并检查错误。
 
@@ -79,6 +119,8 @@ python3 admittance_control.py \
 - `--execute` 启动时若检测到上次遗留的碰撞状态，会先停止并清除该状态
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
 - `--direct-tcp`：固定周期直接写 Dashboard TCP，不等待当前 `ServoP` 回包
+- `--servo-command`：`j` 使用 ROS 2 `InverseKin + ServoJ`（默认），`p` 使用 SDK `ServoP`
+- `--ros-service-prefix`：Dobot ROS 2 服务前缀，默认 `/dobot_bringup_ros2/srv`
 - `--speed-filter-alpha`：TCP 速度低通系数，默认 `1.0`（关闭）
 - `--target-filter-alpha`：ServoP 目标位姿低通系数，默认 `1.0`（关闭）
 - `--sync-feedback`：每帧六维力触发一次控制，按反馈时间戳计算 `dt`
