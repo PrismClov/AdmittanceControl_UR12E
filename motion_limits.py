@@ -2,6 +2,29 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 
+def expand_tcp_motion_limits(values):
+    """Return six-axis velocity and acceleration limits.
+
+    Four values are expanded uniformly:
+    linear velocity, angular velocity, linear acceleration, angular acceleration.
+    Twelve values are used as velocity[0:6] followed by acceleration[0:6].
+    """
+    values = np.asarray(values, dtype=float)
+    if not np.all(np.isfinite(values)):
+        raise ValueError("motion limit values must be finite")
+    if values.shape == (4,):
+        velocity = np.repeat(values[:2], 3)
+        acceleration = np.repeat(values[2:], 3)
+    elif values.shape == (12,):
+        velocity = values[:6]
+        acceleration = values[6:]
+    else:
+        raise ValueError("expected four or twelve motion limit values")
+    if np.any(velocity < 0.0) or np.any(acceleration < 0.0):
+        raise ValueError("motion limit values must be non-negative")
+    return velocity.copy(), acceleration.copy()
+
+
 class CartesianVelocityAccelerationLimiter:
     """Limit six-axis TCP velocity and its acceleration at the target layer."""
 

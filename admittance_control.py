@@ -10,8 +10,16 @@ from scipy.spatial.transform import Rotation as R
 import filter_module
 from force_transform import wrench_tool_to_user
 from motion_logger import MotionCsvLogger
-from motion_limits import CartesianVelocityAccelerationLimiter, integrate_velocity
+from motion_limits import (
+    CartesianVelocityAccelerationLimiter,
+    expand_tcp_motion_limits,
+    integrate_velocity,
+)
 from realtime_pipeline import LatestRobotState, ServoPStream
+
+
+DEFAULT_TCP_MAX_VELOCITY = [0.15, 0.15, 0.15, 0.5, 0.5, 0.5]
+DEFAULT_TCP_MAX_ACCELERATION = [0.8, 0.8, 0.8, 1.5, 1.5, 1.5]
 
 
 def parse_six_axis_values(text):
@@ -35,6 +43,14 @@ def nonnegative_parameters(text):
     if any(value < 0.0 for value in values):
         raise argparse.ArgumentTypeError("values must be non-negative")
     return values
+
+
+def tcp_motion_limits(text):
+    values = [float(value.strip()) for value in text.split(",")]
+    try:
+        return expand_tcp_motion_limits(values)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 parser = argparse.ArgumentParser(description="CR5 六维力导纳控制")
@@ -88,11 +104,22 @@ parser.add_argument(
     metavar="K1,...,K6",
 )
 parser.add_argument(
+    "--tcp-motion-limits",
+    "--motion-limits",
+    type=tcp_motion_limits,
+    default=None,
+    metavar="VLIN,VANG,ALIN,AANG",
+    help=(
+        "unified TCP limits; use four values for uniform axes or twelve "
+        "values for velocity[6] followed by acceleration[6]"
+    ),
+)
+parser.add_argument(
     "--tcp-max-velocity",
     "--max-velocity",
     dest="tcp_max_velocity",
     type=nonnegative_parameters,
-    default=[0.15, 0.15, 0.15, 0.5, 0.5, 0.5],
+    default=None,
     metavar="V1,...,V6",
     help="six-axis TCP velocity limit in m/s and rad/s",
 )
@@ -101,7 +128,7 @@ parser.add_argument(
     "--max-acceleration",
     dest="tcp_max_acceleration",
     type=nonnegative_parameters,
-    default=[0.8, 0.8, 0.8, 1.5, 1.5, 1.5],
+    default=None,
     metavar="A1,...,A6",
     help="six-axis TCP acceleration limit in m/s^2 and rad/s^2",
 )
@@ -127,6 +154,15 @@ if args.duration < 0.0:
     parser.error("--duration must be non-negative")
 if not args.sdk.is_file():
     parser.error(f"Dobot SDK not found: {args.sdk}")
+
+tcp_max_velocity = DEFAULT_TCP_MAX_VELOCITY.copy()
+tcp_max_acceleration = DEFAULT_TCP_MAX_ACCELERATION.copy()
+if args.tcp_motion_limits is not None:
+    tcp_max_velocity, tcp_max_acceleration = args.tcp_motion_limits
+if args.tcp_max_velocity is not None:
+    tcp_max_velocity = args.tcp_max_velocity
+if args.tcp_max_acceleration is not None:
+    tcp_max_acceleration = args.tcp_max_acceleration
 
 
 def load_sdk(path):
@@ -341,8 +377,8 @@ D = args.damping
 K = args.stiffness
 Deadband = [1.5, 1.5, 1.5, 0.015, 0.05, 0.3]
 motion_limiter = CartesianVelocityAccelerationLimiter(
-    args.tcp_max_velocity,
-    args.tcp_max_acceleration,
+    tcp_max_velocity,
+    tcp_max_acceleration,
     dt,
 )
 

@@ -3,10 +3,30 @@ import unittest
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-from motion_limits import CartesianVelocityAccelerationLimiter, integrate_velocity
+from motion_limits import (
+    CartesianVelocityAccelerationLimiter,
+    expand_tcp_motion_limits,
+    integrate_velocity,
+)
 
 
 class CartesianMotionLimiterTest(unittest.TestCase):
+    def test_expands_unified_limits(self):
+        velocity, acceleration = expand_tcp_motion_limits(
+            [0.15, 0.5, 0.8, 1.5]
+        )
+
+        np.testing.assert_allclose(velocity, [0.15, 0.15, 0.15, 0.5, 0.5, 0.5])
+        np.testing.assert_allclose(acceleration, [0.8, 0.8, 0.8, 1.5, 1.5, 1.5])
+
+    def test_accepts_six_axis_limits(self):
+        velocity, acceleration = expand_tcp_motion_limits(
+            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+        )
+
+        np.testing.assert_allclose(velocity, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+        np.testing.assert_allclose(acceleration, [0.7, 0.8, 0.9, 1.0, 1.1, 1.2])
+
     def test_clamps_velocity_before_acceleration(self):
         limiter = CartesianVelocityAccelerationLimiter(
             max_velocity=[0.1, 0.1, 0.1, 0.6, 0.6, 0.6],

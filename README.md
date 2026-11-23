@@ -70,9 +70,17 @@ K = 80,80,80,1.1,1.1,2
 只有速度和加速度限制，没有 jerk 限制：
 
 ```bash
---tcp-max-velocity "0.15,0.15,0.15,0.5,0.5,0.5" \
---tcp-max-acceleration "0.8,0.8,0.8,1.5,1.5,1.5"
+--tcp-motion-limits "0.15,0.5,0.8,1.5"
 ```
+
+四个数的顺序是：线速度、角速度、线加速度、角加速度，并分别应用到
+`x/y/z` 和 `rx/ry/rz`。确实需要逐轴分别设置时，可传 12 个数：
+
+```bash
+--tcp-motion-limits "0.15,0.15,0.15,0.5,0.5,0.5,0.8,0.8,0.8,1.5,1.5,1.5"
+```
+
+原先的 `--tcp-max-velocity` 和 `--tcp-max-acceleration` 仍可单独覆盖对应轴。
 
 ## 执行
 
@@ -127,6 +135,7 @@ python3 analyze_motion.py logs/A.csv logs/B.csv logs/C.csv \
 - `--force-filter-alpha`：六维力低通系数，默认 `0.35`
 - `--speed-filter-alpha`：TCP 速度低通系数，默认 `1.0`（关闭）
 - `--target-filter-alpha`：ServoP 目标位姿低通系数，默认 `1.0`（关闭）
+- `--tcp-motion-limits`：统一设置速度/加速度限制；简写四个数或逐轴十二个数
 - `--tcp-max-velocity`：六轴目标速度上限；默认线速度 `0.15 m/s`、角速度 `0.5 rad/s`
 - `--tcp-max-acceleration`：六轴目标加速度上限；默认线加速度 `0.8 m/s^2`、角加速度 `1.5 rad/s^2`
 - `--metrics-csv`：记录六轴原始力、滤波力、导纳力、实际速度/加速度/Jerk、命令与实际位姿
