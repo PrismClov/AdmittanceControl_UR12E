@@ -16,6 +16,12 @@ class FakeFeedback:
         return {"value": self.value}
 
 
+class ConstantTimestampFeedback:
+    def feedBackData(self):
+        time.sleep(0.002)
+        return {"TimeStamp": [12345]}
+
+
 class LatestRobotStateTest(unittest.TestCase):
     def test_snapshot_returns_latest_without_waiting_for_sequence(self):
         reader = LatestRobotState(FakeFeedback(), output_hz=200.0)
@@ -32,6 +38,20 @@ class LatestRobotStateTest(unittest.TestCase):
             published = reader.published_period_stats()
             self.assertGreater(published["samples"], 0)
             self.assertGreater(published["median_hz"], 100.0)
+        finally:
+            reader.stop()
+
+    def test_does_not_publish_the_same_source_sample_twice(self):
+        reader = LatestRobotState(
+            ConstantTimestampFeedback(),
+            output_hz=200.0,
+        )
+        reader.start()
+        try:
+            _, sequence, _ = reader.wait_for_data()
+            time.sleep(0.08)
+            _, later_sequence, _ = reader.snapshot()
+            self.assertEqual(later_sequence, sequence)
         finally:
             reader.stop()
 

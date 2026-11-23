@@ -30,11 +30,13 @@ class LatestRobotState:
         self._condition = threading.Condition()
         self._raw_packet = None
         self._raw_packet_at = None
+        self._raw_packet_stamp = None
         self._packet = None
         self._sequence = 0
         self._received_at = None
         self._published_at = None
         self._published_packet_at = None
+        self._published_source_stamp = None
         self._receive_intervals = deque(maxlen=512)
         self._published_intervals = deque(maxlen=512)
         self._error = None
@@ -74,6 +76,16 @@ class LatestRobotState:
                 self._stop.wait(0.05)
                 continue
             received_at = time.monotonic()
+            timestamp_values = (
+                packet["TimeStamp"]
+                if isinstance(packet, np.ndarray)
+                else packet.get("TimeStamp")
+            )
+            source_stamp = (
+                int(timestamp_values[0])
+                if timestamp_values is not None and len(timestamp_values)
+                else received_at
+            )
             with self._condition:
                 if self._received_at is not None:
                     interval = received_at - self._received_at
@@ -82,6 +94,7 @@ class LatestRobotState:
                 self._received_at = received_at
                 self._raw_packet = packet
                 self._raw_packet_at = received_at
+                self._raw_packet_stamp = source_stamp
                 self._error = None
                 self._condition.notify_all()
 
@@ -95,10 +108,15 @@ class LatestRobotState:
             with self._condition:
                 packet = self._raw_packet
                 packet_at = self._raw_packet_at
-                if packet is not None:
+                source_stamp = self._raw_packet_stamp
+                if (
+                    packet is not None
+                    and source_stamp != self._published_source_stamp
+                ):
                     self._packet = packet
                     self._sequence += 1
                     self._published_packet_at = packet_at
+                    self._published_source_stamp = source_stamp
                     if self._published_at is not None:
                         published_interval = time.monotonic() - self._published_at
                         if 0.001 <= published_interval <= 0.1:
@@ -106,6 +124,10 @@ class LatestRobotState:
                     self._published_at = time.monotonic()
                     self._condition.notify_all()
             next_publish += self._output_period
+            now = time.monotonic()
+            if next_publish < now - self._output_period:
+                missed = int((now - next_publish) // self._output_period) + 1
+                next_publish += missed * self._output_period
 
     def wait_for_data(self, timeout=1.0):
         with self._condition:
@@ -190,6 +212,10 @@ class ServoPStream:
         self._target_sequence = 0
         self._last_sent_sequence = 0
         self._pending_sends = deque()
+        self._pending_lock = threading.Lock()
+        self._max_pending = 4
+        self._reply_timeout_s = 0.5
+        self.max_pending_observed = 0
         self._reply_buffer = ""
         self._send_lock = threading.Lock()
         self._sender_stop = threading.Event()
@@ -241,7 +267,6 @@ class ServoPStream:
     def _send_loop(self):
         next_send = time.monotonic()
         previous_sent_at = None
-        last_sequence = -1
         while not self._sender_stop.is_set():
             now = time.monotonic()
             if now < next_send:
@@ -257,6 +282,18 @@ class ServoPStream:
                 continue
 
             sent_at = time.monotonic()
+            with self._pending_lock:
+                if len(self._pending_sends) >= self._max_pending:
+                    with self._condition:
+                        self._fault = (
+                            f"ServoP pending queue exceeded {self._max_pending}"
+                        )
+                    return
+                self._pending_sends.append((sequence, sent_at))
+                self.max_pending_observed = max(
+                    self.max_pending_observed,
+                    len(self._pending_sends),
+                )
             message = self.command(
                 values,
                 self._period,
@@ -267,20 +304,38 @@ class ServoPStream:
                 with self._send_lock:
                     self._sock.sendall(message.encode("utf-8"))
             except OSError as exc:
+                with self._pending_lock:
+                    self._pending_sends = deque(
+                        item
+                        for item in self._pending_sends
+                        if item[0] != sequence
+                    )
                 with self._condition:
                     self._fault = f"ServoP send failed: {exc}"
                 return
-            self._pending_sends.append(sent_at)
             self.sent_count += 1
             if previous_sent_at is not None:
                 self.send_intervals.append(sent_at - previous_sent_at)
             previous_sent_at = sent_at
-            last_sequence = sequence
             self._last_sent_sequence = sequence
 
             next_send += self._period
             if next_send < time.monotonic() - self._period:
                 next_send = time.monotonic()
+
+    def _check_reply_timeouts(self, now):
+        with self._pending_lock:
+            while self._pending_sends:
+                sequence, sent_at = self._pending_sends[0]
+                if now - sent_at <= self._reply_timeout_s:
+                    break
+                self._pending_sends.popleft()
+                with self._condition:
+                    self._fault = (
+                        f"ServoP reply timeout for sequence {sequence}"
+                    )
+                return False
+        return True
 
     def _receive_loop(self):
         old_timeout = self._sock.gettimeout()
@@ -290,6 +345,8 @@ class ServoPStream:
                 try:
                     chunk = self._sock.recv(4096)
                 except TimeoutError:
+                    if not self._check_reply_timeouts(time.monotonic()):
+                        return
                     continue
                 except OSError as exc:
                     if not self._receiver_stop.is_set():
@@ -308,10 +365,16 @@ class ServoPStream:
                 for message in messages:
                     if not message.strip():
                         continue
-                    if not self._pending_sends:
+                    with self._pending_lock:
+                        pending = (
+                            self._pending_sends.popleft()
+                            if self._pending_sends
+                            else None
+                        )
+                    if pending is None:
                         self.unknown_reply_count += 1
                         continue
-                    sent_at = self._pending_sends.popleft()
+                    _, sent_at = pending
                     self.reply_latencies.append(received_at - sent_at)
                     error = parse_error_id(message)
                     if error != 0:
@@ -320,6 +383,8 @@ class ServoPStream:
                                 f"ServoP failed with error {error}: {message!r}"
                             )
                         return
+                if not self._check_reply_timeouts(received_at):
+                    return
         finally:
             self._sock.settimeout(old_timeout)
 
