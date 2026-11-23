@@ -170,6 +170,30 @@ parser.add_argument(
     default=0.01,
     help="maximum contact correction velocity in m/s",
 )
+parser.add_argument(
+    "--contact-confirm-time",
+    type=float,
+    default=0.10,
+    help="stable contact confirmation time in seconds",
+)
+parser.add_argument(
+    "--contact-direction-angle",
+    type=float,
+    default=20.0,
+    help="maximum contact direction deviation in degrees",
+)
+parser.add_argument(
+    "--contact-release-after",
+    type=float,
+    default=0.0,
+    help="seconds of contact before controlled release; 0 disables",
+)
+parser.add_argument(
+    "--contact-release-time",
+    type=float,
+    default=0.50,
+    help="controlled contact force release duration in seconds",
+)
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
@@ -195,6 +219,14 @@ if args.contact_force_deadband < 0.0:
     parser.error("--contact-force-deadband must be non-negative")
 if args.contact_max_velocity <= 0.0:
     parser.error("--contact-max-velocity must be positive")
+if args.contact_confirm_time <= 0.0:
+    parser.error("--contact-confirm-time must be positive")
+if not 0.0 < args.contact_direction_angle < 90.0:
+    parser.error("--contact-direction-angle must be in (0, 90)")
+if args.contact_release_after < 0.0:
+    parser.error("--contact-release-after must be non-negative")
+if args.contact_release_time <= 0.0:
+    parser.error("--contact-release-time must be positive")
 if not args.sdk.is_file():
     parser.error(f"Dobot SDK not found: {args.sdk}")
 
@@ -381,6 +413,7 @@ metric_fields = [
     "servo_pending",
     "servo_rtt_ms",
     "contact_hold",
+    "contact_state",
     "contact_force_n",
     "contact_error_n",
     "contact_velocity",
@@ -452,6 +485,10 @@ contact_monitor = (
         deadband_n=args.contact_force_deadband,
         max_velocity_m_s=args.contact_max_velocity,
         dt=dt,
+        confirm_time_s=args.contact_confirm_time,
+        max_direction_angle_deg=args.contact_direction_angle,
+        release_after_s=args.contact_release_after,
+        release_time_s=args.contact_release_time,
     )
     if args.target_pose is not None
     else None
@@ -612,21 +649,6 @@ try:
         filtered_force = F_ext_filter.update(read_force(packet))
         F_ext = filtered_force - F_ext_comp
         ExternalForceComp(filtered_force, dx_raw)
-        if contact_monitor is not None:
-            contact_hold, contact_velocity, contact_force = (
-                contact_monitor.update(F_ext)
-            )
-        else:
-            contact_hold = False
-            contact_velocity = np.zeros(6)
-            contact_force = 0.0
-        if contact_hold and not contact_notice_printed:
-            print(
-                "\nContact detected: regulating normal force, "
-                f"force={contact_monitor.detected_force_n:.3f} N, "
-                f"target={args.contact_target_force:.3f} N"
-            )
-            contact_notice_printed = True
         (
             _,
             a_admittance_raw,
@@ -642,6 +664,25 @@ try:
             dx,
             F_ext,
         )
+        if contact_monitor is not None:
+            contact_state, contact_velocity, contact_force = (
+                contact_monitor.update(F_ext, v_admittance_raw)
+            )
+        else:
+            contact_state = "free"
+            contact_velocity = v_admittance_raw
+            contact_force = 0.0
+        contact_hold = contact_state != "free"
+        if (
+            contact_state in ("contact", "release")
+            and not contact_notice_printed
+        ):
+            print(
+                "\nStable contact confirmed: regulating normal force, "
+                f"force={contact_monitor.detected_force_n:.3f} N, "
+                f"target={args.contact_target_force:.3f} N"
+            )
+            contact_notice_printed = True
         requested_velocity = (
             contact_velocity if contact_hold else v_admittance_raw
         )
@@ -692,6 +733,7 @@ try:
                     else ""
                 ),
                 "contact_hold": int(contact_hold),
+                "contact_state": contact_state,
                 "contact_force_n": (
                     float(contact_force) if contact_hold else 0.0
                 ),
