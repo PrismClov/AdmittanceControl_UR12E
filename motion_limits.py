@@ -45,6 +45,7 @@ class CartesianVelocityAccelerationLimiter:
         if not np.isfinite(self.dt) or self.dt <= 0.0:
             raise ValueError("dt must be positive")
         self.last_velocity = np.zeros(6)
+        self.last_acceleration = np.zeros(6)
 
     @staticmethod
     def _six_axis_array(values, name):
@@ -57,6 +58,7 @@ class CartesianVelocityAccelerationLimiter:
 
     def update(self, desired_velocity):
         desired = self._six_axis_array(desired_velocity, "desired_velocity")
+        previous_velocity = self.last_velocity.copy()
         limited = np.clip(desired, -self.max_velocity, self.max_velocity)
         max_delta = self.max_acceleration * self.dt
         limited = self.last_velocity + np.clip(
@@ -65,6 +67,7 @@ class CartesianVelocityAccelerationLimiter:
             max_delta,
         )
         self.last_velocity = limited.copy()
+        self.last_acceleration = (limited - previous_velocity) / self.dt
         return limited
 
 

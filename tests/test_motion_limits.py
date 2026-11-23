@@ -54,6 +54,7 @@ class CartesianMotionLimiterTest(unittest.TestCase):
         np.testing.assert_allclose(first, [0.016] * 6)
         np.testing.assert_allclose(second, [0.032] * 6)
         np.testing.assert_allclose(third, [0.016] * 6)
+        np.testing.assert_allclose(limiter.last_acceleration, [-0.8] * 6)
 
     def test_integrates_rotation_with_shortest_path(self):
         pose = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 3.5])

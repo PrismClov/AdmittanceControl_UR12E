@@ -43,6 +43,7 @@ KF 力估计、jerk 限幅、关节空间控制或自定义轨迹复刻。
   时走长路径并生成异常 `ServoP` 目标。
 - 增加 `--mass`、`--damping`、`--stiffness` 三个六轴参数入口。
 - 对导纳生成的 TCP 目标速度增加六轴速度和加速度限制。
+- 主导纳通道使用连续软死区，消除硬死区边界处的力输入跳变。
 
 默认参数与当前原始仓库一致：
 
@@ -122,7 +123,9 @@ python3 analyze_motion.py logs/A.csv logs/B.csv logs/C.csv \
 
 ## 控制说明
 
-- 原导纳公式和 `M/D/K/Deadband` 参数保持不变
+- 原导纳公式、`M/D/K` 和死区宽度保持不变
+- 主导纳力使用 `sign(F) * max(abs(F) - Deadband, 0)` 连续软死区
+- 零漂补偿仍使用独立硬阈值，仅决定何时更新零漂，不直接进入主导纳力
 - 力偏置使用小步长残差更新，仅在六轴速度低于门限时执行
 - 角速度由相邻位姿的 `R_current @ R_previous.T` 计算
 - 输出姿态使用与左乘姿态增量一致的旋转向量
@@ -138,7 +141,8 @@ python3 analyze_motion.py logs/A.csv logs/B.csv logs/C.csv \
 - `--tcp-motion-limits`：统一设置速度/加速度限制；简写四个数或逐轴十二个数
 - `--tcp-max-velocity`：六轴目标速度上限；默认线速度 `0.15 m/s`、角速度 `0.5 rad/s`
 - `--tcp-max-acceleration`：六轴目标加速度上限；默认线加速度 `0.8 m/s^2`、角加速度 `1.5 rad/s^2`
-- `--metrics-csv`：记录六轴原始力、滤波力、导纳力、实际速度/加速度/Jerk、命令与实际位姿
+- `--metrics-csv`：记录软死区前后力误差、限幅前后 TCP 速度、受限加速度、
+  原始力、滤波力、实际速度和命令/实际位姿
 - 控制周期和 ServoP 发送周期互相独立，始终只发送最新导纳目标
 - 只限制速度与加速度，没有 jerk、位姿幅值或循环看门狗限制
 - `ActualTCPForce` 按当前 TCP 姿态从 Tool 坐标系旋转到 User/Base 坐标系

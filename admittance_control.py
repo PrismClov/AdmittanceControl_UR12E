@@ -8,6 +8,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 import filter_module
+from force_processing import continuous_deadband
 from force_transform import wrench_tool_to_user
 from motion_logger import MotionCsvLogger
 from motion_limits import (
@@ -339,6 +340,11 @@ for axis in log_axes:
             f"a_actual_{axis}",
             f"jerk_actual_{axis}",
             f"a_admittance_raw_{axis}",
+            f"e_F_raw_{axis}",
+            f"e_F_deadband_{axis}",
+            f"tcp_velocity_raw_{axis}",
+            f"tcp_velocity_limited_{axis}",
+            f"tcp_acceleration_limited_{axis}",
             f"x_target_{axis}",
             f"x_actual_{axis}",
             f"x_target_minus_actual_{axis}",
@@ -441,17 +447,16 @@ def admittance_control(M, D, K, dt, x, dx, F_ext):
 
     e = [0] * 6
     de = [0] * 6
-    e_F = [0] * 6
-
     e[0:3] = np.array(x_d[0:3]) - np.array(x[0:3])
     rot_x_d = R.from_rotvec(x_d[3:6])
     rot_x = R.from_rotvec(x[3:6])
     e[3:6] = (rot_x_d * rot_x.inv()).as_rotvec()
     de[0:6] = np.array(dx_d[0:6]) - np.array(dx[0:6])
-    e_F[0:6] = np.array(F_d[0:6]) - np.array(F_ext[0:6])
-    for i in range(6):
-        if abs(e_F[i]) < Deadband[i]:
-            e_F[i] = 0
+    e_F_raw = np.asarray(F_d[:6], dtype=float) - np.asarray(
+        F_ext[:6],
+        dtype=float,
+    )
+    e_F = continuous_deadband(e_F_raw, Deadband)
 
     for i in range(6):
         ddx_c[i] = (D[i] * de[i] + K[i] * e[i] - e_F[i]) / M[i] + ddx_d[i]
@@ -460,7 +465,13 @@ def admittance_control(M, D, K, dt, x, dx, F_ext):
 
     x_c[0:3] = np.array(x[0:3]) + np.array(deltax_c[0:3])
     x_c[3:6] = (R.from_rotvec(deltax_c[3:6]) * rot_x).as_rotvec()
-    return x_c, ddx_c, np.asarray(dx_c, dtype=float)
+    return (
+        x_c,
+        ddx_c,
+        np.asarray(dx_c, dtype=float),
+        e_F_raw,
+        e_F,
+    )
 
 
 def ExternalForceComp(filtered_force, speed):
@@ -531,7 +542,13 @@ try:
         filtered_force = F_ext_filter.update(read_force(packet))
         F_ext = filtered_force - F_ext_comp
         ExternalForceComp(filtered_force, dx_raw)
-        _, a_admittance_raw, v_admittance_raw = admittance_control(
+        (
+            _,
+            a_admittance_raw,
+            v_admittance_raw,
+            e_F_raw,
+            e_F_deadband,
+        ) = admittance_control(
             M,
             D,
             K,
@@ -541,6 +558,7 @@ try:
             F_ext,
         )
         v_admittance_limited = motion_limiter.update(v_admittance_raw)
+        a_admittance_limited = motion_limiter.last_acceleration
         x_c = integrate_velocity(x, v_admittance_limited, control_dt)
         filtered_target = target_filter.update(x_c)
         x_servo = np.asarray(x_c, dtype=float).copy()
@@ -595,6 +613,15 @@ try:
                 row[f"a_actual_{axis}"] = actual_acceleration[index]
                 row[f"jerk_actual_{axis}"] = actual_jerk[index]
                 row[f"a_admittance_raw_{axis}"] = a_admittance_raw[index]
+                row[f"e_F_raw_{axis}"] = e_F_raw[index]
+                row[f"e_F_deadband_{axis}"] = e_F_deadband[index]
+                row[f"tcp_velocity_raw_{axis}"] = v_admittance_raw[index]
+                row[f"tcp_velocity_limited_{axis}"] = (
+                    v_admittance_limited[index]
+                )
+                row[f"tcp_acceleration_limited_{axis}"] = (
+                    a_admittance_limited[index]
+                )
                 row[f"x_target_{axis}"] = x_c[index]
                 row[f"x_actual_{axis}"] = x[index]
                 row[f"x_target_minus_actual_{axis}"] = (
