@@ -149,7 +149,7 @@ parser.add_argument(
     "--contact-stop-force",
     type=float,
     default=5.0,
-    help="activate contact force control after external force magnitude in N",
+    help="activate contact force control at this force in N; 0 disables",
 )
 parser.add_argument(
     "--contact-target-force",
@@ -209,8 +209,8 @@ if not 0.0 < args.force_filter_alpha <= 1.0:
     parser.error("--force-filter-alpha must be in (0, 1]")
 if args.duration < 0.0:
     parser.error("--duration must be non-negative")
-if args.contact_stop_force <= 0.0:
-    parser.error("--contact-stop-force must be positive")
+if args.contact_stop_force < 0.0:
+    parser.error("--contact-stop-force must be non-negative")
 if args.contact_target_force <= 0.0:
     parser.error("--contact-target-force must be positive")
 if args.contact_kp < 0.0 or args.contact_ki < 0.0:
@@ -490,7 +490,7 @@ contact_monitor = (
         release_after_s=args.contact_release_after,
         release_time_s=args.contact_release_time,
     )
-    if args.target_pose is not None
+    if args.target_pose is not None and args.contact_stop_force > 0.0
     else None
 )
 
