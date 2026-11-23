@@ -1,4 +1,4 @@
-"""ROS 2 service adapter with a single-in-flight ServoJ pipeline."""
+"""ROS 2 service adapter with a single-in-flight ServoP/ServoJ pipeline."""
 
 from __future__ import annotations
 
@@ -89,8 +89,8 @@ class Ros2FeedbackReader:
         self.node.destroy_node()
 
 
-class Ros2ServoJController:
-    """Turn Cartesian targets into ServoJ using asynchronous ROS 2 services."""
+class Ros2ServoController:
+    """Send ServoP or ServoJ with one in-flight ROS 2 service request."""
 
     def __init__(self, service_prefix="/dobot_bringup_ros2/srv"):
         import rclpy
@@ -99,6 +99,7 @@ class Ros2ServoJController:
             EnableRobot,
             RobotMode,
             ServoJ,
+            ServoP,
             SixForceHome,
             Stop,
         )
@@ -109,6 +110,7 @@ class Ros2ServoJController:
             "enable": EnableRobot,
             "robot_mode": RobotMode,
             "servo_j": ServoJ,
+            "servo_p": ServoP,
             "six_force_home": SixForceHome,
             "stop": Stop,
         }
@@ -122,6 +124,7 @@ class Ros2ServoJController:
                 ("enable", EnableRobot, "EnableRobot"),
                 ("robot_mode", RobotMode, "RobotMode"),
                 ("servo_j", ServoJ, "ServoJ"),
+                ("servo_p", ServoP, "ServoP"),
                 ("six_force_home", SixForceHome, "SixForceHome"),
                 ("stop", Stop, "Stop"),
             )
@@ -139,6 +142,8 @@ class Ros2ServoJController:
         self.last_latency_s = None
         self.sent_count = 0
         self.coalesced_count = 0
+        self.transient_timeout_count = 0
+        self._consecutive_timeout_count = 0
         self._executor = rclpy.executors.SingleThreadedExecutor()
         self._executor.add_node(self.node)
         self._executor_thread = threading.Thread(
@@ -202,6 +207,7 @@ class Ros2ServoJController:
             if self._fault is not None or self._closed:
                 return False
             self._latest_target = (
+                "joint",
                 np.asarray(joint_degrees, dtype=float).copy(),
                 float(dt),
             )
@@ -211,6 +217,49 @@ class Ros2ServoJController:
             self._start_latest()
             return True
 
+    def submit_pose(self, pose_mm_degrees, dt) -> bool:
+        """Keep only the newest Cartesian target for ROS 2 ServoP."""
+
+        with self._lock:
+            if self._fault is not None or self._closed:
+                return False
+            self._latest_target = (
+                "pose",
+                np.asarray(pose_mm_degrees, dtype=float).copy(),
+                float(dt),
+            )
+            if self._active_stage is not None:
+                self.coalesced_count += 1
+                return False
+            self._start_latest()
+            return True
+
+    def prime_pose(self, pose_mm_degrees, dt=0.02, attempts=3) -> None:
+        """Warm up the ServoP dashboard connection while holding the pose."""
+
+        values = np.asarray(pose_mm_degrees, dtype=float)
+        if values.shape != (6,) or not np.all(np.isfinite(values)):
+            raise ValueError("invalid ServoP warm-up target")
+        last_result = None
+        for _ in range(attempts):
+            request = self._types["servo_p"].Request()
+            request.a, request.b, request.c = values[:3]
+            request.d, request.e, request.f = values[3:]
+            request.param_value = [
+                f"t={dt:.6f}",
+                "aheadtime=50.000000",
+                "gain=500.000000",
+            ]
+            response = self.call("servo_p", request, timeout=2.0)
+            last_result = int(response.res)
+            if last_result == 0:
+                return
+            if last_result != -1000:
+                raise RuntimeError(f"ROS 2 ServoP warm-up failed: {last_result}")
+        raise RuntimeError(
+            f"ROS 2 ServoP warm-up did not recover: {last_result}"
+        )
+
     def _start_latest(self) -> None:
         if (
             self._active_stage is not None
@@ -218,36 +267,49 @@ class Ros2ServoJController:
             or not self._latest_target
         ):
             return
-        joints, dt = self._latest_target
+        target_kind, values, dt = self._latest_target
         self._latest_target = None
-        if joints.shape != (6,) or not np.all(np.isfinite(joints)):
-            self._set_fault(RuntimeError("invalid joint target"))
+        if values.shape != (6,) or not np.all(np.isfinite(values)):
+            self._set_fault(RuntimeError("invalid six-axis servo target"))
             return
 
-        request = self._types["servo_j"].Request()
-        request.a, request.b, request.c = joints[:3]
-        request.d, request.e, request.f = joints[3:]
+        client_key = "servo_j" if target_kind == "joint" else "servo_p"
+        request = self._types[client_key].Request()
+        request.a, request.b, request.c = values[:3]
+        request.d, request.e, request.f = values[3:]
         request.param_value = [
             f"t={dt:.6f}",
             "aheadtime=50.000000",
             "gain=500.000000",
         ]
-        self._active_stage = "servo_j"
+        self._active_stage = client_key
         self.started_at = time.monotonic()
         self.last_send_at = self.started_at
-        self._active_future = self._clients["servo_j"].call_async(request)
-        self._active_future.add_done_callback(self._on_servo_j)
+        self._active_future = self._clients[client_key].call_async(request)
+        self._active_future.add_done_callback(self._on_servo)
 
-    def _on_servo_j(self, future) -> None:
+    def _on_servo(self, future) -> None:
         if self._closed:
             return
         try:
             with self._lock:
-                if self._active_stage != "servo_j":
+                if self._active_stage not in ("servo_j", "servo_p"):
                     return
             response = future.result()
-            if int(response.res) != 0:
-                raise RuntimeError(f"ROS 2 ServoJ failed: {int(response.res)}")
+            result = int(response.res)
+            if result == -1000 and self._active_stage == "servo_p":
+                self.transient_timeout_count += 1
+                self._consecutive_timeout_count += 1
+                if self._consecutive_timeout_count >= 3:
+                    raise RuntimeError(
+                        "ROS 2 ServoP failed with three consecutive -1000 replies"
+                    )
+            elif result != 0:
+                raise RuntimeError(
+                    f"ROS 2 {self._active_stage} failed: {result}"
+                )
+            else:
+                self._consecutive_timeout_count = 0
             with self._lock:
                 self.last_reply_at = time.monotonic()
                 if self.last_send_at is not None:
@@ -279,7 +341,7 @@ class Ros2ServoJController:
     def raise_if_fault(self) -> None:
         with self._lock:
             if self._fault is not None:
-                raise RuntimeError(f"ROS 2 ServoJ fault: {self._fault}")
+                raise RuntimeError(f"ROS 2 servo fault: {self._fault}")
 
     def close(self) -> None:
         if self._closed:

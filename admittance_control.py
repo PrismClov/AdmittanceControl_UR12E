@@ -1,7 +1,5 @@
 import argparse
-import importlib.util
 from pathlib import Path
-import re
 import threading
 import time
 
@@ -10,16 +8,11 @@ from scipy.spatial.transform import Rotation as R
 
 import filter_module
 from local_kinematics import Cr5LocalKinematics
-from ros2_servo import Ros2FeedbackReader, Ros2ServoJController
+from ros2_servo import Ros2FeedbackReader, Ros2ServoController
 
 
 parser = argparse.ArgumentParser(description="CR5 六维力导纳控制")
 parser.add_argument("--robot-ip", default="192.168.5.5")
-parser.add_argument(
-    "--sdk",
-    type=Path,
-    default=Path(__file__).with_name("sdk") / "dobot_api.py",
-)
 parser.add_argument("--dt", type=float, default=0.02)
 parser.add_argument(
     "--feedback-hz",
@@ -32,11 +25,6 @@ parser.add_argument("--execute", action="store_true", help="默认只试运行�
 parser.add_argument("--zero-sensor", action="store_true")
 parser.add_argument("--timing", action="store_true", help="打印控制周期统计")
 parser.add_argument(
-    "--direct-tcp",
-    action="store_true",
-    help="固定周期直接发送 ServoP，不等待当前命令回包",
-)
-parser.add_argument(
     "--sync-feedback",
     action="store_true",
     help="每收到一帧六维力反馈执行一次控制，并将反馈 dt 用于导纳积分",
@@ -45,7 +33,7 @@ parser.add_argument(
     "--servo-command",
     choices=("p", "j"),
     default="j",
-    help="p=SDK ServoP; j=ROS2 InverseKin + ServoJ（默认）",
+    help="p=ROS2 ServoP; j=local kinematics + ROS2 ServoJ（默认）",
 )
 parser.add_argument(
     "--ros-service-prefix",
@@ -75,40 +63,6 @@ if not 0.0 < args.target_filter_alpha <= 1.0:
     parser.error("--target-filter-alpha must be in (0, 1]")
 if args.duration < 0.0:
     parser.error("--duration must be non-negative")
-if not args.sdk.is_file():
-    parser.error(f"Dobot SDK not found: {args.sdk}")
-if args.direct_tcp and args.servo_command != "p":
-    parser.error("--direct-tcp requires --servo-command p")
-
-
-def load_sdk(path):
-    spec = importlib.util.spec_from_file_location("dobot_api_v4", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def require_connected_socket(sock, host, port, name):
-    try:
-        peer = sock.getpeername()
-    except (AttributeError, OSError) as exc:
-        raise ConnectionError(
-            f"{name} is unreachable at {host}:{port}; "
-            "check controller power, Ethernet cable and IP address"
-        ) from exc
-    if peer[0] != host or peer[1] != port:
-        raise ConnectionError(
-            f"{name} connected to unexpected endpoint {peer}, expected {host}:{port}"
-        )
-
-
-def parse_error_id(response):
-    if response is None or not str(response).strip():
-        return 0
-    values = re.findall(r"-?\d+", str(response))
-    if not values:
-        raise RuntimeError(f"无法解析 CR5 回复: {response!r}")
-    return int(values[0])
 
 
 def read_pose(packet):
@@ -147,40 +101,9 @@ def pose_for_servop(pose, reference_rpy_degrees):
     return values
 
 
-def servo_p_command(values, dt, aheadtime=50, gain=500):
-    return (
-        "ServoP("
-        f"{values[0]:.6f},{values[1]:.6f},{values[2]:.6f},"
-        f"{values[3]:.6f},{values[4]:.6f},{values[5]:.6f},"
-        f"t={dt:.6f},aheadtime={aheadtime:.6f},gain={gain:.6f})"
-    )
-
-
-sdk = load_sdk(args.sdk)
-rtde_c = None
-servo_c = None
-ros_servo = None
-if args.servo_command == "p":
-    rtde_c = sdk.DobotApiDashboard(args.robot_ip, 29999)
-    servo_c = rtde_c
-    require_connected_socket(
-        rtde_c.socket_dobot,
-        args.robot_ip,
-        29999,
-        "CR5 dashboard",
-    )
-if args.servo_command == "j":
-    ros_servo = Ros2ServoJController(args.ros_service_prefix)
-    ros_servo.wait_until_ready()
-    rtde_recv = Ros2FeedbackReader(args.ros_feed_topic)
-else:
-    rtde_recv = sdk.DobotApiFeedBack(args.robot_ip, 30004)
-    require_connected_socket(
-        rtde_recv.socket_dobot,
-        args.robot_ip,
-        30004,
-        "CR5 feedback",
-    )
+ros_servo = Ros2ServoController(args.ros_service_prefix)
+ros_servo.wait_until_ready()
+rtde_recv = Ros2FeedbackReader(args.ros_feed_topic)
 
 
 def get_packet():
@@ -268,64 +191,24 @@ class LatestFeedback:
             )
 
 
-direct_reply_buffer = ""
-
-
 def stop_robot():
-    if args.servo_command == "j":
-        response = ros_servo.call("stop", timeout=2.0)
-        return int(response.res)
-    return parse_error_id(rtde_c.Stop())
+    response = ros_servo.call("stop", timeout=2.0)
+    return int(response.res)
 
 
 def clear_robot_error():
-    if args.servo_command == "j":
-        response = ros_servo.call("clear_error")
-        return int(response.res)
-    return parse_error_id(rtde_c.ClearError())
+    response = ros_servo.call("clear_error")
+    return int(response.res)
 
 
 def enable_robot():
-    if args.servo_command == "j":
-        response = ros_servo.call("enable")
-        return int(response.res)
-    return parse_error_id(rtde_c.EnableRobot())
+    response = ros_servo.call("enable")
+    return int(response.res)
 
 
 def zero_force_sensor():
-    if args.servo_command == "j":
-        response = ros_servo.call("six_force_home")
-        return int(response.res)
-    return parse_error_id(rtde_c.SixForceHome())
-
-
-def drain_direct_replies(raise_on_error=True):
-    """Drain completed replies without waiting for the current ServoP."""
-
-    global direct_reply_buffer
-    if not args.direct_tcp:
-        return
-    sock = servo_c.socket_dobot
-    old_timeout = sock.gettimeout()
-    try:
-        sock.setblocking(False)
-        while True:
-            try:
-                chunk = sock.recv(4096)
-            except BlockingIOError:
-                break
-            if not chunk:
-                break
-            direct_reply_buffer += chunk.decode(errors="replace")
-    finally:
-        sock.settimeout(old_timeout)
-
-    messages = direct_reply_buffer.split(";")
-    direct_reply_buffer = messages.pop()
-    if raise_on_error:
-        for message in messages:
-            if message.strip() and parse_error_id(message) != 0:
-                raise RuntimeError(f"Direct ServoP failed: {message!r}")
+    response = ros_servo.call("six_force_home")
+    return int(response.res)
 
 
 feedback_reader = LatestFeedback(rtde_recv, args.feedback_hz)
@@ -526,6 +409,13 @@ def ExternalForceComp(filtered_force, speed):
             F_ext_comp[i] += BiasUpdateBeta * residual[i]
 
 
+if args.execute and args.servo_command == "p":
+    ros_servo.prime_pose(
+        pose_for_servop(x_init, packet["ToolVectorActual"][0][3:]),
+        dt,
+    )
+
+
 print("Start", "execute=" + str(args.execute))
 started = time.monotonic()
 next_tick = started
@@ -575,21 +465,9 @@ try:
                 servo_values = pose_for_servop(
                     x_servo, packet["ToolVectorActual"][0][3:]
                 )
-                if args.direct_tcp:
-                    drain_direct_replies()
-                    servo_c.send_data(servo_p_command(servo_values, control_dt))
-                else:
-                    response = servo_c.ServoP(
-                        *servo_values,
-                        t=control_dt,
-                        aheadtime=50,
-                        gain=500,
-                    )
-                    error = parse_error_id(response)
-                    if error != 0:
-                        raise RuntimeError(
-                            f"ServoP failed with error {error}: {response!r}"
-                        )
+                ros_servo.submit_pose(servo_values, control_dt)
+                ros_servo.spin_once()
+                ros_servo.raise_if_fault()
 
         print(
             "x_c",
@@ -616,11 +494,9 @@ except KeyboardInterrupt:
     print("\nInterrupted")
 finally:
     if args.execute:
-        if args.direct_tcp:
-            drain_direct_replies(raise_on_error=False)
         try:
-            if ros_servo is not None and not ros_servo.prepare_stop():
-                print("Warning: ROS 2 ServoJ request still active before Stop")
+            if not ros_servo.prepare_stop():
+                print("Warning: ROS 2 servo request still active before Stop")
             stop_error = stop_robot()
             if stop_error != 0:
                 print(f"Stop failed with error {stop_error}")
@@ -652,16 +528,13 @@ finally:
                 else ros_servo.last_latency_s * 1000.0
             )
             print(
-                "ROS2 ServoJ:"
+                f"ROS2 Servo{args.servo_command.upper()}:"
                 f" sent={ros_servo.sent_count}"
                 f" coalesced={ros_servo.coalesced_count}"
                 f" pending={ros_servo.pending_count}"
                 f" last_latency_ms={latency_ms:.3f}"
             )
-    if rtde_c is not None:
-        rtde_c.close()
     feedback_reader.stop()
     rtde_recv.close()
-    if ros_servo is not None:
-        ros_servo.close()
+    ros_servo.close()
     print("\nStopped")
