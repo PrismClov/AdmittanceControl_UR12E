@@ -139,8 +139,11 @@ class AdmittanceTrajectory:
         if frozen:
             self._velocity = np.zeros(6)
             self._acceleration = np.zeros(6)
+            # Do not keep commanding a pose that the robot cannot track.
+            # Hold the measured pose until the tracking error is recovered.
+            self._command_pose = current.copy()
             return TrajectoryStep(
-                target_pose=self._command_pose.copy(),
+                target_pose=current.copy(),
                 velocity=self._velocity.copy(),
                 acceleration=self._acceleration.copy(),
                 tracking_error=tracking,
@@ -159,6 +162,33 @@ class AdmittanceTrajectory:
         offset[3:] = (
             command_rotation * nominal_rotation.inv()
         ).as_rotvec()
+
+        # Make the resting state explicit.  The spring alone continues to
+        # produce tiny commands around the nominal pose because velocity and
+        # acceleration limits prevent an exact instantaneous stop.
+        at_nominal = bool(
+            np.linalg.norm(offset[:3])
+            <= 0.01 * self.limits.max_tracking_translation
+            and np.linalg.norm(offset[3:])
+            <= 0.01 * self.limits.max_tracking_rotation
+        )
+        velocity_is_small = bool(
+            np.linalg.norm(self._velocity[:3])
+            <= 0.02 * self.limits.max_velocity[0]
+            and np.linalg.norm(self._velocity[3:])
+            <= 0.02 * self.limits.max_velocity[3]
+        )
+        if not np.any(effective_wrench) and at_nominal and velocity_is_small:
+            self._command_pose = self._nominal_pose.copy()
+            self._velocity = np.zeros(6)
+            self._acceleration = np.zeros(6)
+            return TrajectoryStep(
+                target_pose=self._nominal_pose.copy(),
+                velocity=self._velocity.copy(),
+                acceleration=self._acceleration.copy(),
+                tracking_error=tracking,
+                frozen=False,
+            )
 
         acceleration_request = (
             effective_wrench

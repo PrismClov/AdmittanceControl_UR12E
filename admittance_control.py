@@ -40,14 +40,14 @@ parser.add_argument(
     action="store_true",
     help="每收到一帧六维力反馈执行一次控制，并将反馈 dt 用于导纳积分",
 )
-parser.add_argument("--max-linear-velocity", type=float, default=0.15)
-parser.add_argument("--max-angular-velocity", type=float, default=0.5)
-parser.add_argument("--max-linear-acceleration", type=float, default=2.0)
-parser.add_argument("--max-angular-acceleration", type=float, default=6.0)
-parser.add_argument("--max-linear-jerk", type=float, default=8.0)
-parser.add_argument("--max-angular-jerk", type=float, default=24.0)
-parser.add_argument("--max-tracking-translation", type=float, default=0.03)
-parser.add_argument("--max-tracking-rotation", type=float, default=0.15)
+parser.add_argument("--max-linear-velocity", type=float, default=0.05)
+parser.add_argument("--max-angular-velocity", type=float, default=0.2)
+parser.add_argument("--max-linear-acceleration", type=float, default=0.5)
+parser.add_argument("--max-angular-acceleration", type=float, default=1.5)
+parser.add_argument("--max-linear-jerk", type=float, default=10.0)
+parser.add_argument("--max-angular-jerk", type=float, default=30.0)
+parser.add_argument("--max-tracking-translation", type=float, default=0.02)
+parser.add_argument("--max-tracking-rotation", type=float, default=0.10)
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")

@@ -83,10 +83,11 @@ python3 admittance_control.py \
 - `--execute` 启动时若检测到上次遗留的碰撞状态，会先停止并清除该状态
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
 - `--direct-tcp`：固定周期直接写 Dashboard TCP，不等待当前 `ServoP` 回包
-- `--max-linear-velocity` / `--max-angular-velocity`：默认 `0.15 m/s` / `0.5 rad/s`
-- `--max-linear-acceleration` / `--max-angular-acceleration`：默认 `2.0 m/s²` / `6.0 rad/s²`
-- `--max-linear-jerk` / `--max-angular-jerk`：默认 `8.0 m/s³` / `24.0 rad/s³`
-- `--max-tracking-translation` / `--max-tracking-rotation`：默认 `0.03 m` / `0.15 rad`
+- `--max-linear-velocity` / `--max-angular-velocity`：默认 `0.05 m/s` / `0.2 rad/s`
+- `--max-linear-acceleration` / `--max-angular-acceleration`：默认 `0.5 m/s²` / `1.5 rad/s²`
+- `--max-linear-jerk` / `--max-angular-jerk`：默认 `10.0 m/s³` / `30.0 rad/s³`
+- `--max-tracking-translation` / `--max-tracking-rotation`：默认 `0.02 m` / `0.10 rad`
+- 外力释放且接近初始位姿、速度足够小时，轨迹显式落零以避免残余来回小运动
 - `--sync-feedback`：每帧六维力触发一次控制，按反馈时间戳计算 `dt`
 - `--feedback-hz`：六维力软件输出频率，默认 `50 Hz`
 - 默认固定频率模式会后台持续读取反馈，每次控制只使用最新一帧，避免旧包积压
