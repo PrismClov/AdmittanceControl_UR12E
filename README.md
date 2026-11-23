@@ -5,7 +5,7 @@
 ## 接口
 
 - `/dobot_bringup_ros2/msg/FeedInfo`：读取位姿、关节和六维力
-- `/dobot_bringup_ros2/srv/InverseKin`、`ServoJ`：ROS 2 控制服务
+- `/dobot_bringup_ros2/srv/ServoJ`：ROS 2 运动服务
 - `ServoP` 兼容模式仍直接使用 `192.168.5.5:29999`
 - `SixForceHome`：由 `--zero-sensor` 显式触发
 
@@ -55,8 +55,9 @@ python3 admittance_control.py \
   --timing
 ```
 
-默认运动接口通过 Dobot ROS 2 驱动调用 `InverseKin + ServoJ`。控制循环
-保持 50 Hz；ROS 2 命令使用单一在途请求，忙时只保留最新目标，不排队：
+默认运动接口使用本地 CR5 URDF、FK 和几何 Jacobian 生成关节目标，再通过
+Dobot ROS 2 驱动发送 `ServoJ`。控制循环保持 50 Hz；ROS 2 命令使用单一
+在途请求，忙时只保留最新目标，不排队：
 
 启动 ROS 2 驱动：
 
@@ -90,7 +91,7 @@ python3 admittance_control.py \
   --timing
 ```
 
-`ServoJ` 使用当前反馈关节作为 `JointNear`，并检查逆解关节是否发生大范围跳变。
+启动时使用当前 `QActual` 和 `ToolVectorActual` 标定 URDF 末端到 TCP 的固定变换。
 六维力、位姿和关节反馈均从 ROS 2 `FeedInfo` 话题读取。
 该模式不能与 `--direct-tcp` 同时使用。
 
@@ -119,8 +120,9 @@ python3 admittance_control.py \
 - `--execute` 启动时若检测到上次遗留的碰撞状态，会先停止并清除该状态
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
 - `--direct-tcp`：固定周期直接写 Dashboard TCP，不等待当前 `ServoP` 回包
-- `--servo-command`：`j` 使用 ROS 2 `InverseKin + ServoJ`（默认），`p` 使用 SDK `ServoP`
+- `--servo-command`：`j` 使用本地 Jacobian + ROS 2 `ServoJ`（默认），`p` 使用 SDK `ServoP`
 - `--ros-service-prefix`：Dobot ROS 2 服务前缀，默认 `/dobot_bringup_ros2/srv`
+- `--urdf`：本地运动学模型，默认使用 `dobot_rviz/share/dobot_rviz/urdf/cr5_robot.urdf`
 - `--speed-filter-alpha`：TCP 速度低通系数，默认 `1.0`（关闭）
 - `--target-filter-alpha`：ServoP 目标位姿低通系数，默认 `1.0`（关闭）
 - `--sync-feedback`：每帧六维力触发一次控制，按反馈时间戳计算 `dt`

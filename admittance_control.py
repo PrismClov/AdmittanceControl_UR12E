@@ -9,6 +9,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 import filter_module
+from local_kinematics import Cr5LocalKinematics
 from ros2_servo import Ros2FeedbackReader, Ros2ServoJController
 
 
@@ -55,6 +56,11 @@ parser.add_argument(
     "--ros-feed-topic",
     default="/dobot_bringup_ros2/msg/FeedInfo",
     help="Dobot ROS2 combined feedback topic",
+)
+parser.add_argument(
+    "--urdf",
+    type=Path,
+    help="CR5 URDF used for local Jacobian-based ServoJ targets",
 )
 parser.add_argument("--speed-filter-alpha", type=float, default=1.0)
 parser.add_argument("--target-filter-alpha", type=float, default=1.0)
@@ -367,6 +373,24 @@ if args.execute:
 
 x_init = read_pose(packet)
 print(x_init)
+local_kinematics = None
+if args.servo_command == "j":
+    urdf_path = args.urdf
+    if urdf_path is None:
+        from ament_index_python.packages import get_package_share_directory
+
+        urdf_path = (
+            Path(get_package_share_directory("dobot_rviz"))
+            / "urdf"
+            / "cr5_robot.urdf"
+        )
+    if not urdf_path.is_file():
+        raise FileNotFoundError(f"CR5 URDF not found: {urdf_path}")
+    local_kinematics = Cr5LocalKinematics(
+        urdf_path,
+        packet["QActual"][0],
+        x_init,
+    )
 x_d = x_init
 dx_d = [0, 0, 0, 0, 0, 0]
 ddx_d = [0, 0, 0, 0, 0, 0]
@@ -538,32 +562,34 @@ try:
         x_servo = target_filter.update(x_c)
 
         if args.execute:
-            servo_values = pose_for_servop(
-                x_servo, packet["ToolVectorActual"][0][3:]
-            )
             if args.servo_command == "j":
-                ros_servo.submit_pose(
-                    servo_values,
+                joint_target = local_kinematics.solve_tcp_pose(
+                    x_servo,
                     packet["QActual"][0],
                     control_dt,
                 )
+                ros_servo.submit_joints(joint_target, control_dt)
                 ros_servo.spin_once()
                 ros_servo.raise_if_fault()
-            elif args.direct_tcp:
-                drain_direct_replies()
-                servo_c.send_data(servo_p_command(servo_values, control_dt))
             else:
-                response = servo_c.ServoP(
-                    *servo_values,
-                    t=control_dt,
-                    aheadtime=50,
-                    gain=500,
+                servo_values = pose_for_servop(
+                    x_servo, packet["ToolVectorActual"][0][3:]
                 )
-                error = parse_error_id(response)
-                if error != 0:
-                    raise RuntimeError(
-                        f"ServoP failed with error {error}: {response!r}"
+                if args.direct_tcp:
+                    drain_direct_replies()
+                    servo_c.send_data(servo_p_command(servo_values, control_dt))
+                else:
+                    response = servo_c.ServoP(
+                        *servo_values,
+                        t=control_dt,
+                        aheadtime=50,
+                        gain=500,
                     )
+                    error = parse_error_id(response)
+                    if error != 0:
+                        raise RuntimeError(
+                            f"ServoP failed with error {error}: {response!r}"
+                        )
 
         print(
             "x_c",

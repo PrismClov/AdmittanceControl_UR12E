@@ -9,8 +9,6 @@ from typing import Sequence
 
 import numpy as np
 
-from servo_j import joint_target_error, parse_inverse_kinematics
-
 
 def feed_info_to_packet(data):
     """Map the ROS 2 FeedInfo JSON names to the original controller packet."""
@@ -99,7 +97,6 @@ class Ros2ServoJController:
         from dobot_msgs_v4.srv import (
             ClearError,
             EnableRobot,
-            InverseKin,
             RobotMode,
             ServoJ,
             SixForceHome,
@@ -110,7 +107,6 @@ class Ros2ServoJController:
         self._types = {
             "clear_error": ClearError,
             "enable": EnableRobot,
-            "ik": InverseKin,
             "robot_mode": RobotMode,
             "servo_j": ServoJ,
             "six_force_home": SixForceHome,
@@ -124,7 +120,6 @@ class Ros2ServoJController:
             for key, cls, name in (
                 ("clear_error", ClearError, "ClearError"),
                 ("enable", EnableRobot, "EnableRobot"),
-                ("ik", InverseKin, "InverseKin"),
                 ("robot_mode", RobotMode, "RobotMode"),
                 ("servo_j", ServoJ, "ServoJ"),
                 ("six_force_home", SixForceHome, "SixForceHome"),
@@ -139,7 +134,6 @@ class Ros2ServoJController:
         self._fault = None
         self._closed = False
         self.started_at = None
-        self.ik_completed_at = None
         self.last_send_at = None
         self.last_reply_at = None
         self.last_latency_s = None
@@ -201,15 +195,14 @@ class Ros2ServoJController:
             raise TimeoutError(f"ROS 2 service timeout: {key}")
         return future.result()
 
-    def submit_pose(self, pose_mm_deg, current_joints_deg, dt) -> bool:
-        """Keep only the newest target and start work when the pipeline is idle."""
+    def submit_joints(self, joint_degrees, dt) -> bool:
+        """Keep only the newest joint target and send when the link is idle."""
 
         with self._lock:
             if self._fault is not None or self._closed:
                 return False
             self._latest_target = (
-                np.asarray(pose_mm_deg, dtype=float).copy(),
-                np.asarray(current_joints_deg, dtype=float).copy(),
+                np.asarray(joint_degrees, dtype=float).copy(),
                 float(dt),
             )
             if self._active_stage is not None:
@@ -225,62 +218,25 @@ class Ros2ServoJController:
             or not self._latest_target
         ):
             return
-        pose, joints, dt = self._latest_target
+        joints, dt = self._latest_target
         self._latest_target = None
-
-        request = self._types["ik"].Request()
-        request.x, request.y, request.z = pose[:3]
-        request.rx, request.ry, request.rz = pose[3:]
-        request.use_joint_near = "1"
-        request.joint_near = (
-            "{" + ",".join(f"{value:.6f}" for value in joints) + "}"
-        )
-        request.user = "0"
-        request.tool = "0"
-
-        self._active_stage = "ik"
-        self.started_at = time.monotonic()
-        self._active_future = self._clients["ik"].call_async(request)
-        self._active_future.add_done_callback(
-            lambda future: self._on_ik(future, joints, dt)
-        )
-
-    def _on_ik(self, future, near_joints, dt) -> None:
-        if self._closed:
+        if joints.shape != (6,) or not np.all(np.isfinite(joints)):
+            self._set_fault(RuntimeError("invalid joint target"))
             return
-        try:
-            with self._lock:
-                if self._active_stage != "ik":
-                    return
-            response = future.result()
-            if int(response.res) != 0:
-                raise RuntimeError(
-                    f"ROS 2 InverseKin failed: {int(response.res)}"
-                )
-            joints = parse_inverse_kinematics(response.robot_return)
-            error = joint_target_error(joints, near_joints)
-            if np.max(np.abs(error)) > 90.0:
-                raise RuntimeError(
-                    "InverseKin selected a non-neighbour joint solution"
-                )
-            self.ik_completed_at = time.monotonic()
 
-            request = self._types["servo_j"].Request()
-            request.a, request.b, request.c = joints[:3]
-            request.d, request.e, request.f = joints[3:]
-            request.param_value = [
-                f"t={dt:.6f}",
-                "aheadtime=50.000000",
-                "gain=500.000000",
-            ]
-            with self._lock:
-                self._active_stage = "servo_j"
-                self.last_send_at = time.monotonic()
-                self._active_future = self._clients["servo_j"].call_async(request)
-                self._active_future.add_done_callback(self._on_servo_j)
-        except Exception as exc:
-            with self._lock:
-                self._set_fault(exc)
+        request = self._types["servo_j"].Request()
+        request.a, request.b, request.c = joints[:3]
+        request.d, request.e, request.f = joints[3:]
+        request.param_value = [
+            f"t={dt:.6f}",
+            "aheadtime=50.000000",
+            "gain=500.000000",
+        ]
+        self._active_stage = "servo_j"
+        self.started_at = time.monotonic()
+        self.last_send_at = self.started_at
+        self._active_future = self._clients["servo_j"].call_async(request)
+        self._active_future.add_done_callback(self._on_servo_j)
 
     def _on_servo_j(self, future) -> None:
         if self._closed:
