@@ -304,14 +304,13 @@ for i in range(100):
         feedback_reader.get_latest(after_sequence=feedback_sequence)
     )
     F_ext_comp = comp_filter.update(read_force(packet))
-F_ext = read_force(packet) - F_ext_comp
 
 """
 六维力传感器信号滤波
 由于传感器噪声较严重，所以要进行信号滤波
 滤波器的相关函数见filter_module.py
 """
-F_ext_filter = filter_module.RCLowPassFilter(alpha=0.35, initial_value=F_ext)
+F_ext_filter = filter_module.RCLowPassFilter(alpha=0.35, initial_value=F_ext_comp)
 speed_filter = filter_module.RCLowPassFilter(
     alpha=args.speed_filter_alpha,
     initial_value=np.zeros(6),
