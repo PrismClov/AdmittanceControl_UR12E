@@ -72,8 +72,10 @@ python3 admittance_control.py \
 - `--dt`：显式指定控制周期；省略时自动采用实测反馈周期
 - `--servo-period`：ServoP 独立发送周期，默认 `0.02 s`
 - `--feedback-hz`：反馈软件发布频率，默认 `50 Hz`
+- `--force-filter-alpha`：六维力低通系数，默认 `0.35`
 - `--speed-filter-alpha`：TCP 速度低通系数，默认 `1.0`（关闭）
 - `--target-filter-alpha`：ServoP 目标位姿低通系数，默认 `1.0`（关闭）
+- `--metrics-csv`：记录六轴原始力、滤波力、导纳力、实际速度/加速度/Jerk、命令与实际位姿
 - 控制周期和 ServoP 发送周期互相独立，始终只发送最新导纳目标
 - 没有速度限幅、位姿限幅或循环看门狗
 - `ActualTCPForce` 转换为环境外力；用户坐标 Y、Ry 正向修正，Rx 反向修正

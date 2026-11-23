@@ -8,6 +8,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 import filter_module
+from motion_logger import MotionCsvLogger
 from realtime_pipeline import LatestRobotState, ServoPStream
 
 
@@ -42,6 +43,12 @@ parser.add_argument("--zero-sensor", action="store_true")
 parser.add_argument("--timing", action="store_true", help="打印控制周期统计")
 parser.add_argument("--speed-filter-alpha", type=float, default=1.0)
 parser.add_argument("--target-filter-alpha", type=float, default=1.0)
+parser.add_argument("--force-filter-alpha", type=float, default=0.35)
+parser.add_argument(
+    "--metrics-csv",
+    type=Path,
+    help="write six-axis admittance diagnostics to CSV",
+)
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
@@ -53,6 +60,8 @@ if not 0.0 < args.speed_filter_alpha <= 1.0:
     parser.error("--speed-filter-alpha must be in (0, 1]")
 if not 0.0 < args.target_filter_alpha <= 1.0:
     parser.error("--target-filter-alpha must be in (0, 1]")
+if not 0.0 < args.force_filter_alpha <= 1.0:
+    parser.error("--force-filter-alpha must be in (0, 1]")
 if args.duration < 0.0:
     parser.error("--duration must be non-negative")
 if not args.sdk.is_file():
@@ -198,7 +207,10 @@ for i in range(100):
 由于传感器噪声较严重，所以要进行信号滤波
 滤波器的相关函数见filter_module.py
 """
-F_ext_filter = filter_module.RCLowPassFilter(alpha=0.35, initial_value=F_ext_comp)
+F_ext_filter = filter_module.RCLowPassFilter(
+    alpha=args.force_filter_alpha,
+    initial_value=F_ext_comp,
+)
 speed_filter = filter_module.RCLowPassFilter(
     alpha=args.speed_filter_alpha,
     initial_value=np.zeros(6),
@@ -206,6 +218,34 @@ speed_filter = filter_module.RCLowPassFilter(
 target_filter = filter_module.RCLowPassFilter(
     alpha=args.target_filter_alpha,
     initial_value=x_init,
+)
+log_axes = ("x", "y", "z", "rx", "ry", "rz")
+metric_fields = [
+    "time_s",
+    "feedback_sequence",
+    "feedback_age_ms",
+    "servo_sent",
+    "servo_pending",
+    "servo_rtt_ms",
+]
+for axis in log_axes:
+    metric_fields.extend(
+        [
+            f"F_raw_{axis}",
+            f"F_filtered_{axis}",
+            f"F_ext_{axis}",
+            f"v_actual_{axis}",
+            f"a_actual_{axis}",
+            f"jerk_actual_{axis}",
+            f"x_cmd_{axis}",
+            f"x_actual_{axis}",
+            f"x_cmd_minus_actual_{axis}",
+        ]
+    )
+metrics_logger = (
+    MotionCsvLogger(args.metrics_csv, metric_fields)
+    if args.metrics_csv is not None
+    else None
 )
 
 feedback_timing = feedback_reader.period_stats()
@@ -341,6 +381,9 @@ previous_loop_start = None
 last_status_print = started
 loop_intervals = []
 feedback_ages = []
+previous_metric_velocity = None
+previous_metric_acceleration = None
+previous_metric_time = None
 try:
     while args.duration == 0.0 or time.monotonic() - started < args.duration:
         loop_start = time.monotonic()
@@ -354,6 +397,27 @@ try:
         control_dt = dt
         x = read_pose(packet)
         dx_raw = estimate_tcp_speed(x, packet_received_at)
+        if previous_metric_time is None:
+            actual_acceleration = np.zeros(6)
+            actual_jerk = np.zeros(6)
+            previous_metric_time = packet_received_at
+            previous_metric_velocity = dx_raw.copy()
+            previous_metric_acceleration = actual_acceleration.copy()
+        else:
+            metric_dt = packet_received_at - previous_metric_time
+            if metric_dt <= 0.0:
+                actual_acceleration = previous_metric_acceleration.copy()
+                actual_jerk = np.zeros(6)
+            else:
+                actual_acceleration = (
+                    dx_raw - previous_metric_velocity
+                ) / metric_dt
+                actual_jerk = (
+                    actual_acceleration - previous_metric_acceleration
+                ) / metric_dt
+                previous_metric_time = packet_received_at
+                previous_metric_velocity = dx_raw.copy()
+                previous_metric_acceleration = actual_acceleration.copy()
         dx = speed_filter.update(dx_raw)
         filtered_force = F_ext_filter.update(read_force(packet))
         F_ext = filtered_force - F_ext_comp
@@ -367,6 +431,45 @@ try:
             )
             servo_stream.update_target(servo_values)
             servo_stream.raise_if_fault()
+
+        if metrics_logger is not None:
+            commanded_minus_actual = np.zeros(6)
+            commanded_minus_actual[:3] = x_servo[:3] - x[:3]
+            commanded_minus_actual[3:] = (
+                R.from_rotvec(x_servo[3:])
+                * R.from_rotvec(x[3:]).inv()
+            ).as_rotvec()
+            raw_force = read_force(packet)
+            row = {
+                "time_s": loop_start - started,
+                "feedback_sequence": feedback_sequence,
+                "feedback_age_ms": feedback_ages[-1] * 1000.0,
+                "servo_sent": (
+                    servo_stream.sent_count if servo_stream is not None else 0
+                ),
+                "servo_pending": (
+                    servo_stream.pending_count if servo_stream is not None else 0
+                ),
+                "servo_rtt_ms": (
+                    servo_stream.last_rtt_s * 1000.0
+                    if servo_stream is not None
+                    and servo_stream.last_rtt_s is not None
+                    else ""
+                ),
+            }
+            for index, axis in enumerate(log_axes):
+                row[f"F_raw_{axis}"] = raw_force[index]
+                row[f"F_filtered_{axis}"] = filtered_force[index]
+                row[f"F_ext_{axis}"] = F_ext[index]
+                row[f"v_actual_{axis}"] = dx_raw[index]
+                row[f"a_actual_{axis}"] = actual_acceleration[index]
+                row[f"jerk_actual_{axis}"] = actual_jerk[index]
+                row[f"x_cmd_{axis}"] = x_servo[index]
+                row[f"x_actual_{axis}"] = x[index]
+                row[f"x_cmd_minus_actual_{axis}"] = (
+                    commanded_minus_actual[index]
+                )
+            metrics_logger.write(row)
 
         if loop_start - last_status_print >= 0.1:
             print(
@@ -422,6 +525,9 @@ finally:
                     f" max_ms={rtt_ms.max():.3f}"
                     f" unknown_replies={servo_stream.unknown_reply_count}"
                 )
+    if metrics_logger is not None:
+        metrics_logger.close()
+        print(f"Metrics CSV: {metrics_logger.path}")
     rtde_c.close()
     feedback_reader.stop()
     rtde_recv.close()

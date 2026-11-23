@@ -250,6 +250,15 @@ class ServoPStream:
         self._sender.start()
         self._receiver.start()
 
+    @property
+    def pending_count(self):
+        with self._pending_lock:
+            return len(self._pending_sends)
+
+    @property
+    def last_rtt_s(self):
+        return self.reply_latencies[-1] if self.reply_latencies else None
+
     def update_target(self, values):
         values = tuple(float(value) for value in values)
         if len(values) != 6:
