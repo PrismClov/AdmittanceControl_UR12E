@@ -18,7 +18,7 @@ class FakeFeedback:
 
 class LatestRobotStateTest(unittest.TestCase):
     def test_snapshot_returns_latest_without_waiting_for_sequence(self):
-        reader = LatestRobotState(FakeFeedback())
+        reader = LatestRobotState(FakeFeedback(), output_hz=200.0)
         reader.start()
         try:
             first, sequence, _ = reader.wait_for_data()
@@ -29,6 +29,9 @@ class LatestRobotStateTest(unittest.TestCase):
             stats = reader.period_stats()
             self.assertGreater(stats["samples"], 0)
             self.assertGreater(stats["median_hz"], 50.0)
+            published = reader.published_period_stats()
+            self.assertGreater(published["samples"], 0)
+            self.assertGreater(published["median_hz"], 100.0)
         finally:
             reader.stop()
 

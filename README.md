@@ -53,9 +53,9 @@ python3 admittance_control.py \
   --timing
 ```
 
-- `30004` 线程持续读取并维护最新位姿和六维力，不再软件降采样。
-- 控制线程启动时统计反馈周期中位数，并自动与其对齐。
-- `29999` 独立 ServoP 线程按 `--servo-period` 默认 30 ms 发送最新目标。
+- `30004` 线程按硬件约 122 Hz 读取，但默认只向控制层发布最新帧到 50 Hz。
+- 控制线程由每个新的 50 Hz 软件反馈帧触发，计算周期按 `--dt 0.02`。
+- `29999` 独立 ServoP 线程按 `--servo-period 0.02` 发送最新目标，即 50 Hz。
 - 独立应答线程解析 ServoP 回复并统计发送周期、RTT 和错误。
 
 ## 控制说明
@@ -68,7 +68,8 @@ python3 admittance_control.py \
 - `--execute` 启动时若检测到上次遗留的碰撞状态，会先停止并清除该状态
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
 - `--dt`：显式指定控制周期；省略时自动采用实测反馈周期
-- `--servo-period`：ServoP 独立发送周期，默认 `0.03 s`
+- `--servo-period`：ServoP 独立发送周期，默认 `0.02 s`
+- `--feedback-hz`：反馈软件发布频率，默认 `50 Hz`
 - `--speed-filter-alpha`：TCP 速度低通系数，默认 `1.0`（关闭）
 - `--target-filter-alpha`：ServoP 目标位姿低通系数，默认 `1.0`（关闭）
 - 控制周期和 ServoP 发送周期互相独立，始终只发送最新导纳目标

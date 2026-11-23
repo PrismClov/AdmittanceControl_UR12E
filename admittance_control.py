@@ -21,13 +21,20 @@ parser.add_argument(
 parser.add_argument(
     "--dt",
     type=float,
-    help="control period; omit to match the measured feedback rate",
+    default=0.02,
+    help="control period in seconds",
 )
 parser.add_argument(
     "--servo-period",
     type=float,
-    default=0.03,
+    default=0.02,
     help="independent ServoP send period in seconds",
+)
+parser.add_argument(
+    "--feedback-hz",
+    type=float,
+    default=50.0,
+    help="software feedback publication rate",
 )
 parser.add_argument("--duration", type=float, default=0.0, help="0 表示持续运行")
 parser.add_argument("--execute", action="store_true", help="默认只试运行，不发送 ServoP")
@@ -36,10 +43,12 @@ parser.add_argument("--timing", action="store_true", help="打印控制周期统
 parser.add_argument("--speed-filter-alpha", type=float, default=1.0)
 parser.add_argument("--target-filter-alpha", type=float, default=1.0)
 args = parser.parse_args()
-if args.dt is not None and args.dt <= 0.0:
+if args.dt <= 0.0:
     parser.error("--dt must be positive")
 if args.servo_period <= 0.0:
     parser.error("--servo-period must be positive")
+if args.feedback_hz <= 0.0:
+    parser.error("--feedback-hz must be positive")
 if not 0.0 < args.speed_filter_alpha <= 1.0:
     parser.error("--speed-filter-alpha must be in (0, 1]")
 if not 0.0 < args.target_filter_alpha <= 1.0:
@@ -122,7 +131,7 @@ rtde_recv = sdk.DobotApiFeedBack(args.robot_ip, 30004)
 require_connected_socket(rtde_c.socket_dobot, args.robot_ip, 29999, "CR5 dashboard")
 require_connected_socket(rtde_recv.socket_dobot, args.robot_ip, 30004, "CR5 feedback")
 
-feedback_reader = LatestRobotState(rtde_recv)
+feedback_reader = LatestRobotState(rtde_recv, output_hz=args.feedback_hz)
 feedback_reader.start()
 
 # 当前 TCP 位姿作为初始位姿，不额外发送初始运动。
@@ -199,17 +208,22 @@ target_filter = filter_module.RCLowPassFilter(
     initial_value=x_init,
 )
 
-# 设计导纳控制参数
-# 控制周期默认与 30004 反馈频率对齐；--dt 可显式覆盖。
 feedback_timing = feedback_reader.period_stats()
-dt = args.dt if args.dt is not None else feedback_timing["median_s"]
+publish_timing = feedback_reader.published_period_stats()
+dt = args.dt
 if not np.isfinite(dt) or not 0.004 <= dt <= 0.1:
     raise RuntimeError(f"invalid aligned control period: {dt}")
 print(
-    "Feedback:"
+    "Raw feedback:"
     f" median_hz={feedback_timing['median_hz']:.3f}"
     f" median_ms={feedback_timing['median_s'] * 1000.0:.3f}"
     f" p95_ms={feedback_timing['p95_s'] * 1000.0:.3f}"
+)
+print(
+    "Software feedback:"
+    f" median_hz={publish_timing['median_hz']:.3f}"
+    f" median_ms={publish_timing['median_s'] * 1000.0:.3f}"
+    f" p95_ms={publish_timing['p95_s'] * 1000.0:.3f}"
 )
 print(f"Control period: {dt * 1000.0:.3f} ms ({1.0 / dt:.3f} Hz)")
 
@@ -323,7 +337,6 @@ if args.execute:
 
 print("Start", "execute=" + str(args.execute))
 started = time.monotonic()
-next_tick = started
 previous_loop_start = None
 last_status_print = started
 loop_intervals = []
@@ -334,7 +347,9 @@ try:
         if previous_loop_start is not None:
             loop_intervals.append(loop_start - previous_loop_start)
         previous_loop_start = loop_start
-        packet, feedback_sequence, packet_received_at = feedback_reader.snapshot()
+        packet, feedback_sequence, packet_received_at = (
+            feedback_reader.wait_for_next(feedback_sequence)
+        )
         feedback_ages.append(time.monotonic() - packet_received_at)
         control_dt = dt
         x = read_pose(packet)
@@ -363,12 +378,6 @@ try:
                 flush=True,
             )
             last_status_print = loop_start
-        next_tick += dt
-        delay = next_tick - time.monotonic()
-        if delay > 0.0:
-            time.sleep(delay)
-        else:
-            next_tick = time.monotonic()
 except KeyboardInterrupt:
     print("\nInterrupted")
 finally:

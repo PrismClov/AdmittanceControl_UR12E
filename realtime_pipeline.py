@@ -21,29 +21,45 @@ def parse_error_id(message):
 class LatestRobotState:
     """Continuously keep the newest 30004 packet without software downsampling."""
 
-    def __init__(self, feedback):
+    def __init__(self, feedback, output_hz=50.0):
+        if output_hz <= 0.0:
+            raise ValueError("output_hz must be positive")
         self._feedback = feedback
+        self._output_period = 1.0 / float(output_hz)
+        self._next_publish = time.monotonic()
         self._condition = threading.Condition()
+        self._raw_packet = None
+        self._raw_packet_at = None
         self._packet = None
         self._sequence = 0
         self._received_at = None
+        self._published_at = None
+        self._published_packet_at = None
         self._receive_intervals = deque(maxlen=512)
+        self._published_intervals = deque(maxlen=512)
         self._error = None
         self._stop = threading.Event()
-        self._thread = threading.Thread(
+        self._reader_thread = threading.Thread(
             target=self._run,
-            name="cr5-latest-feedback",
+            name="cr5-feedback-reader",
+            daemon=True,
+        )
+        self._publisher_thread = threading.Thread(
+            target=self._publish_loop,
+            name="cr5-feedback-publisher",
             daemon=True,
         )
 
     def start(self):
-        self._thread.start()
+        self._reader_thread.start()
+        self._publisher_thread.start()
 
     def stop(self):
         self._stop.set()
         with self._condition:
             self._condition.notify_all()
-        self._thread.join(timeout=1.0)
+        self._publisher_thread.join(timeout=1.0)
+        self._reader_thread.join(timeout=1.0)
 
     def _run(self):
         while not self._stop.is_set():
@@ -57,16 +73,39 @@ class LatestRobotState:
                     self._condition.notify_all()
                 self._stop.wait(0.05)
                 continue
+            received_at = time.monotonic()
             with self._condition:
                 if self._received_at is not None:
-                    interval = time.monotonic() - self._received_at
+                    interval = received_at - self._received_at
                     if 0.001 <= interval <= 0.1:
                         self._receive_intervals.append(interval)
-                self._packet = packet
-                self._sequence += 1
-                self._received_at = time.monotonic()
+                self._received_at = received_at
+                self._raw_packet = packet
+                self._raw_packet_at = received_at
                 self._error = None
                 self._condition.notify_all()
+
+    def _publish_loop(self):
+        next_publish = time.monotonic()
+        while not self._stop.is_set():
+            delay = next_publish - time.monotonic()
+            if delay > 0.0:
+                self._stop.wait(delay)
+                continue
+            with self._condition:
+                packet = self._raw_packet
+                packet_at = self._raw_packet_at
+                if packet is not None:
+                    self._packet = packet
+                    self._sequence += 1
+                    self._published_packet_at = packet_at
+                    if self._published_at is not None:
+                        published_interval = time.monotonic() - self._published_at
+                        if 0.001 <= published_interval <= 0.1:
+                            self._published_intervals.append(published_interval)
+                    self._published_at = time.monotonic()
+                    self._condition.notify_all()
+            next_publish += self._output_period
 
     def wait_for_data(self, timeout=1.0):
         with self._condition:
@@ -80,7 +119,21 @@ class LatestRobotState:
                 raise RuntimeError(f"CR5 feedback error: {self._error}")
             if self._packet is None:
                 raise TimeoutError("timed out waiting for CR5 feedback")
-            return self._packet, self._sequence, self._received_at
+            return self._packet, self._sequence, self._published_packet_at
+
+    def wait_for_next(self, after_sequence, timeout=0.1):
+        with self._condition:
+            self._condition.wait_for(
+                lambda: self._sequence > after_sequence
+                or self._error is not None
+                or self._stop.is_set(),
+                timeout=timeout,
+            )
+            if self._error is not None:
+                raise RuntimeError(f"CR5 feedback error: {self._error}")
+            if self._sequence <= after_sequence:
+                raise TimeoutError("timed out waiting for next feedback sample")
+            return self._packet, self._sequence, self._published_packet_at
 
     def snapshot(self):
         with self._condition:
@@ -88,13 +141,28 @@ class LatestRobotState:
                 raise RuntimeError(f"CR5 feedback error: {self._error}")
             if self._packet is None:
                 raise TimeoutError("CR5 feedback is not available")
-            return self._packet, self._sequence, self._received_at
+            return self._packet, self._sequence, self._published_packet_at
 
     def period_stats(self):
         with self._condition:
             intervals = np.asarray(self._receive_intervals, dtype=float)
         if intervals.size == 0:
             raise RuntimeError("not enough feedback timing samples")
+        median = float(np.median(intervals))
+        return {
+            "samples": int(intervals.size),
+            "mean_s": float(intervals.mean()),
+            "median_s": median,
+            "p95_s": float(np.percentile(intervals, 95)),
+            "max_s": float(intervals.max()),
+            "median_hz": 1.0 / median,
+        }
+
+    def published_period_stats(self):
+        with self._condition:
+            intervals = np.asarray(self._published_intervals, dtype=float)
+        if intervals.size == 0:
+            raise RuntimeError("not enough published feedback samples")
         median = float(np.median(intervals))
         return {
             "samples": int(intervals.size),
