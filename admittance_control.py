@@ -8,6 +8,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 import filter_module
+from contact_monitor import ContactHold
 from force_processing import continuous_deadband
 from force_transform import wrench_tool_to_user
 from motion_logger import MotionCsvLogger
@@ -144,6 +145,12 @@ parser.add_argument(
     metavar="X,Y,Z,RX,RY,RZ",
     help="admittance target pose in mm and degrees",
 )
+parser.add_argument(
+    "--contact-stop-force",
+    type=float,
+    default=5.0,
+    help="latch target motion after external force magnitude in N",
+)
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
@@ -159,6 +166,8 @@ if not 0.0 < args.force_filter_alpha <= 1.0:
     parser.error("--force-filter-alpha must be in (0, 1]")
 if args.duration < 0.0:
     parser.error("--duration must be non-negative")
+if args.contact_stop_force <= 0.0:
+    parser.error("--contact-stop-force must be positive")
 if not args.sdk.is_file():
     parser.error(f"Dobot SDK not found: {args.sdk}")
 
@@ -344,6 +353,8 @@ metric_fields = [
     "servo_sent",
     "servo_pending",
     "servo_rtt_ms",
+    "contact_hold",
+    "contact_force_n",
 ]
 for axis in log_axes:
     metric_fields.extend(
@@ -402,6 +413,11 @@ motion_limiter = CartesianVelocityAccelerationLimiter(
     tcp_max_velocity,
     tcp_max_acceleration,
     dt,
+)
+contact_monitor = (
+    ContactHold(args.contact_stop_force)
+    if args.target_pose is not None
+    else None
 )
 
 # 零漂更新只在小残差、低速和低角速度时进行。
@@ -520,6 +536,7 @@ feedback_ages = []
 previous_metric_velocity = None
 previous_metric_acceleration = None
 previous_metric_time = None
+contact_notice_printed = False
 try:
     while args.duration == 0.0 or time.monotonic() - started < args.duration:
         loop_start = time.monotonic()
@@ -558,6 +575,17 @@ try:
         filtered_force = F_ext_filter.update(read_force(packet))
         F_ext = filtered_force - F_ext_comp
         ExternalForceComp(filtered_force, dx_raw)
+        contact_hold = (
+            contact_monitor.update(F_ext)
+            if contact_monitor is not None
+            else False
+        )
+        if contact_hold and not contact_notice_printed:
+            print(
+                "\nContact detected: holding target at current pose, "
+                f"force={contact_monitor.detected_force_n:.3f} N"
+            )
+            contact_notice_printed = True
         (
             _,
             a_admittance_raw,
@@ -573,7 +601,10 @@ try:
             dx,
             F_ext,
         )
-        v_admittance_limited = motion_limiter.update(v_admittance_raw)
+        requested_velocity = (
+            np.zeros(6) if contact_hold else v_admittance_raw
+        )
+        v_admittance_limited = motion_limiter.update(requested_velocity)
         a_admittance_limited = motion_limiter.last_acceleration
         x_c = integrate_velocity(x, v_admittance_limited, control_dt)
         filtered_target = target_filter.update(x_c)
@@ -618,6 +649,12 @@ try:
                     if servo_stream is not None
                     and servo_stream.last_rtt_s is not None
                     else ""
+                ),
+                "contact_hold": int(contact_hold),
+                "contact_force_n": (
+                    float(np.linalg.norm(F_ext[:3]))
+                    if contact_hold
+                    else 0.0
                 ),
             }
             for index, axis in enumerate(log_axes):
