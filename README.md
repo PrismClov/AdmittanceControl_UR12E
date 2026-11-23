@@ -60,6 +60,16 @@ python3 admittance_control.py \
 - 独立应答线程解析 ServoP 回复并统计发送周期、RTT 和错误。
 - ServoP 发送先登记再发送，限制最大在途请求并检测应答超时。
 
+分析速度滤波和六维力到速度的耦合：
+
+```bash
+python3 analyze_motion.py logs/A.csv logs/B.csv logs/C.csv \
+  --json-output logs/analysis.json
+```
+
+脚本输出六轴力、原始/控制速度、加速度和 Jerk 的 RMS，5 Hz 以上高频 RMS，
+主频，跟踪误差，以及力到速度的相干度和增益。
+
 ## 控制说明
 
 - 原导纳公式和 `M/D/K/Deadband` 参数保持不变
@@ -69,7 +79,7 @@ python3 admittance_control.py \
 - `ServoP` 前选择与当前欧拉角连续且矩阵等价的欧拉角分支，避免 Rx 在 ±180° 跳变
 - `--execute` 启动时若检测到上次遗留的碰撞状态，会先停止并清除该状态
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
-- `--dt`：显式指定控制周期；省略时自动采用实测反馈周期
+- `--dt`：控制周期，默认 `0.02 s`
 - `--servo-period`：ServoP 独立发送周期，默认 `0.02 s`
 - `--feedback-hz`：反馈软件发布频率，默认 `50 Hz`
 - `--force-filter-alpha`：六维力低通系数，默认 `0.35`

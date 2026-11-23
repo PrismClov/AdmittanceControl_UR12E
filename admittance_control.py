@@ -224,6 +224,7 @@ metric_fields = [
     "time_s",
     "feedback_sequence",
     "feedback_age_ms",
+    "control_dt_s",
     "servo_sent",
     "servo_pending",
     "servo_rtt_ms",
@@ -234,12 +235,16 @@ for axis in log_axes:
             f"F_raw_{axis}",
             f"F_filtered_{axis}",
             f"F_ext_{axis}",
-            f"v_actual_{axis}",
+            f"v_actual_raw_{axis}",
+            f"v_control_{axis}",
             f"a_actual_{axis}",
             f"jerk_actual_{axis}",
-            f"x_cmd_{axis}",
+            f"a_admittance_raw_{axis}",
+            f"x_target_{axis}",
             f"x_actual_{axis}",
-            f"x_cmd_minus_actual_{axis}",
+            f"x_target_minus_actual_{axis}",
+            f"x_servo_{axis}",
+            f"x_servo_minus_actual_{axis}",
         ]
     )
 metrics_logger = (
@@ -325,7 +330,7 @@ def admittance_control(M, D, K, dt, x, dx, F_ext):
     目标笛卡儿位姿
     """
 
-    ddx_c = [0] * 6
+    ddx_c = np.zeros(6)
     dx_c = [0] * 6
     deltax_c = [0] * 6
     x_c = [0] * 6
@@ -351,7 +356,7 @@ def admittance_control(M, D, K, dt, x, dx, F_ext):
 
     x_c[0:3] = np.array(x[0:3]) + np.array(deltax_c[0:3])
     x_c[3:6] = (R.from_rotvec(deltax_c[3:6]) * rot_x).as_rotvec()
-    return x_c
+    return x_c, ddx_c
 
 
 def ExternalForceComp(filtered_force, speed):
@@ -422,7 +427,15 @@ try:
         filtered_force = F_ext_filter.update(read_force(packet))
         F_ext = filtered_force - F_ext_comp
         ExternalForceComp(filtered_force, dx_raw)
-        x_c = admittance_control(M, D, K, control_dt, x, dx, F_ext)
+        x_c, a_admittance_raw = admittance_control(
+            M,
+            D,
+            K,
+            control_dt,
+            x,
+            dx,
+            F_ext,
+        )
         x_servo = target_filter.update(x_c)
 
         if args.execute:
@@ -433,9 +446,15 @@ try:
             servo_stream.raise_if_fault()
 
         if metrics_logger is not None:
-            commanded_minus_actual = np.zeros(6)
-            commanded_minus_actual[:3] = x_servo[:3] - x[:3]
-            commanded_minus_actual[3:] = (
+            target_minus_actual = np.zeros(6)
+            target_minus_actual[:3] = x_c[:3] - x[:3]
+            target_minus_actual[3:] = (
+                R.from_rotvec(x_c[3:])
+                * R.from_rotvec(x[3:]).inv()
+            ).as_rotvec()
+            servo_minus_actual = np.zeros(6)
+            servo_minus_actual[:3] = x_servo[:3] - x[:3]
+            servo_minus_actual[3:] = (
                 R.from_rotvec(x_servo[3:])
                 * R.from_rotvec(x[3:]).inv()
             ).as_rotvec()
@@ -444,6 +463,7 @@ try:
                 "time_s": loop_start - started,
                 "feedback_sequence": feedback_sequence,
                 "feedback_age_ms": feedback_ages[-1] * 1000.0,
+                "control_dt_s": control_dt,
                 "servo_sent": (
                     servo_stream.sent_count if servo_stream is not None else 0
                 ),
@@ -461,13 +481,19 @@ try:
                 row[f"F_raw_{axis}"] = raw_force[index]
                 row[f"F_filtered_{axis}"] = filtered_force[index]
                 row[f"F_ext_{axis}"] = F_ext[index]
-                row[f"v_actual_{axis}"] = dx_raw[index]
+                row[f"v_actual_raw_{axis}"] = dx_raw[index]
+                row[f"v_control_{axis}"] = dx[index]
                 row[f"a_actual_{axis}"] = actual_acceleration[index]
                 row[f"jerk_actual_{axis}"] = actual_jerk[index]
-                row[f"x_cmd_{axis}"] = x_servo[index]
+                row[f"a_admittance_raw_{axis}"] = a_admittance_raw[index]
+                row[f"x_target_{axis}"] = x_c[index]
                 row[f"x_actual_{axis}"] = x[index]
-                row[f"x_cmd_minus_actual_{axis}"] = (
-                    commanded_minus_actual[index]
+                row[f"x_target_minus_actual_{axis}"] = (
+                    target_minus_actual[index]
+                )
+                row[f"x_servo_{axis}"] = x_servo[index]
+                row[f"x_servo_minus_actual_{axis}"] = (
+                    servo_minus_actual[index]
                 )
             metrics_logger.write(row)
 
