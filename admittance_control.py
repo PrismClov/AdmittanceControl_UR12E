@@ -9,6 +9,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 import filter_module
+from admittance_trajectory import AdmittanceTrajectory, TrajectoryLimits
 
 
 parser = argparse.ArgumentParser(description="CR5 六维力导纳控制")
@@ -39,17 +40,31 @@ parser.add_argument(
     action="store_true",
     help="每收到一帧六维力反馈执行一次控制，并将反馈 dt 用于导纳积分",
 )
-parser.add_argument("--speed-filter-alpha", type=float, default=1.0)
-parser.add_argument("--target-filter-alpha", type=float, default=1.0)
+parser.add_argument("--max-linear-velocity", type=float, default=0.15)
+parser.add_argument("--max-angular-velocity", type=float, default=0.5)
+parser.add_argument("--max-linear-acceleration", type=float, default=2.0)
+parser.add_argument("--max-angular-acceleration", type=float, default=6.0)
+parser.add_argument("--max-linear-jerk", type=float, default=8.0)
+parser.add_argument("--max-angular-jerk", type=float, default=24.0)
+parser.add_argument("--max-tracking-translation", type=float, default=0.03)
+parser.add_argument("--max-tracking-rotation", type=float, default=0.15)
 args = parser.parse_args()
 if args.dt <= 0.0:
     parser.error("--dt must be positive")
 if args.feedback_hz <= 0.0:
     parser.error("--feedback-hz must be positive")
-if not 0.0 < args.speed_filter_alpha <= 1.0:
-    parser.error("--speed-filter-alpha must be in (0, 1]")
-if not 0.0 < args.target_filter_alpha <= 1.0:
-    parser.error("--target-filter-alpha must be in (0, 1]")
+for name in (
+    "max_linear_velocity",
+    "max_angular_velocity",
+    "max_linear_acceleration",
+    "max_angular_acceleration",
+    "max_linear_jerk",
+    "max_angular_jerk",
+    "max_tracking_translation",
+    "max_tracking_rotation",
+):
+    if getattr(args, name) <= 0.0:
+        parser.error(f"--{name.replace('_', '-')} must be positive")
 if args.duration < 0.0:
     parser.error("--duration must be non-negative")
 if not args.sdk.is_file():
@@ -296,10 +311,6 @@ if args.execute:
 
 x_init = read_pose(packet)
 print(x_init)
-x_d = x_init
-dx_d = [0, 0, 0, 0, 0, 0]
-ddx_d = [0, 0, 0, 0, 0, 0]
-F_d = [0, 0, 0, 0, 0, 0]
 
 if args.zero_sensor:
     response = rtde_c.SixForceHome()
@@ -325,14 +336,6 @@ for i in range(100):
 滤波器的相关函数见filter_module.py
 """
 F_ext_filter = filter_module.RCLowPassFilter(alpha=0.35, initial_value=F_ext_comp)
-speed_filter = filter_module.RCLowPassFilter(
-    alpha=args.speed_filter_alpha,
-    initial_value=np.zeros(6),
-)
-target_filter = filter_module.RCLowPassFilter(
-    alpha=args.target_filter_alpha,
-    initial_value=x_init,
-)
 
 # 设计导纳控制参数
 M = [0.8, 0.8, 0.8, 0.01, 0.01, 0.01]
@@ -340,85 +343,45 @@ D = [16, 16, 16, 0.12, 0.12, 0.16]
 K = [80, 80, 80, 1.1, 1.1, 2]
 dt = args.dt
 Deadband = [1.5, 1.5, 1.5, 0.015, 0.05, 0.3]
+trajectory = AdmittanceTrajectory(
+    M,
+    D,
+    K,
+    Deadband,
+    TrajectoryLimits(
+        max_velocity=(
+            args.max_linear_velocity,
+            args.max_linear_velocity,
+            args.max_linear_velocity,
+            args.max_angular_velocity,
+            args.max_angular_velocity,
+            args.max_angular_velocity,
+        ),
+        max_acceleration=(
+            args.max_linear_acceleration,
+            args.max_linear_acceleration,
+            args.max_linear_acceleration,
+            args.max_angular_acceleration,
+            args.max_angular_acceleration,
+            args.max_angular_acceleration,
+        ),
+        max_jerk=(
+            args.max_linear_jerk,
+            args.max_linear_jerk,
+            args.max_linear_jerk,
+            args.max_angular_jerk,
+            args.max_angular_jerk,
+            args.max_angular_jerk,
+        ),
+        max_tracking_translation=args.max_tracking_translation,
+        max_tracking_rotation=args.max_tracking_rotation,
+    ),
+)
+trajectory.reset(x_init)
 
 # 零漂更新只在小残差、低速和低角速度时进行。
 BiasUpdateBeta = 0.001
 BiasVelocityGate = [0.005, 0.005, 0.005, 0.02, 0.02, 0.02]
-last_velocity_pose = None
-
-
-def estimate_tcp_speed(pose):
-    """由相邻位姿计算基坐标/用户坐标下的 TCP 速度和角速度。
-
-    姿态角速度使用 R_current @ R_previous.T，得到与控制器左乘姿态增量
-    一致的旋转向量速度。
-    """
-
-    global last_velocity_pose
-    now = time.monotonic()
-    if last_velocity_pose is None:
-        last_velocity_pose = (now, np.array(pose, dtype=float))
-        return np.zeros(6)
-    previous_time, previous_pose = last_velocity_pose
-    elapsed = now - previous_time
-    last_velocity_pose = (now, np.array(pose, dtype=float))
-    if elapsed <= 0.0:
-        return np.zeros(6)
-
-    speed = np.empty(6)
-    speed[:3] = (np.array(pose[:3]) - previous_pose[:3]) / elapsed
-    previous_rotation = R.from_rotvec(previous_pose[3:])
-    current_rotation = R.from_rotvec(pose[3:])
-    rotation_delta = current_rotation * previous_rotation.inv()
-    speed[3:] = rotation_delta.as_rotvec() / elapsed
-    return speed
-
-
-def admittance_control(M, D, K, dt, x, dx, F_ext):
-    """导纳控制
-
-    参数:
-    M     -- 导纳惯性矩阵
-    D     -- 导纳阻尼矩阵
-    K     -- 导纳刚度矩阵
-    dt    -- 离散时间
-    x     -- 当前笛卡儿位姿
-    dx    -- 当前速度
-    F_ext -- 当前外部作用力
-
-    返回:
-    目标笛卡儿位姿
-    """
-
-    ddx_c = [0] * 6
-    dx_c = [0] * 6
-    deltax_c = [0] * 6
-    x_c = [0] * 6
-
-    e = [0] * 6
-    de = [0] * 6
-    e_F = [0] * 6
-
-    e[0:3] = np.array(x_d[0:3]) - np.array(x[0:3])
-    rot_x_d = R.from_rotvec(x_d[3:6])
-    rot_x = R.from_rotvec(x[3:6])
-    e[3:6] = (rot_x_d * rot_x.inv()).as_rotvec()
-    de[0:6] = np.array(dx_d[0:6]) - np.array(dx[0:6])
-    e_F[0:6] = np.array(F_d[0:6]) - np.array(F_ext[0:6])
-    for i in range(6):
-        if abs(e_F[i]) < Deadband[i]:
-            e_F[i] = 0
-
-    for i in range(6):
-        ddx_c[i] = (D[i] * de[i] + K[i] * e[i] - e_F[i]) / M[i] + ddx_d[i]
-        dx_c[i] = dx[i] + ddx_c[i] * dt
-        deltax_c[i] = dx_c[i] * dt
-
-    x_c[0:3] = np.array(x[0:3]) + np.array(deltax_c[0:3])
-    x_c[3:6] = (R.from_rotvec(deltax_c[3:6]) * rot_x).as_rotvec()
-    return x_c
-
-
 def ExternalForceComp(filtered_force, speed):
     residual = filtered_force - F_ext_comp
     motion_is_small = all(
@@ -458,13 +421,12 @@ try:
                 control_dt = feedback_timestamp - previous_feedback_timestamp
             previous_feedback_timestamp = feedback_timestamp
         x = read_pose(packet)
-        dx_raw = estimate_tcp_speed(x)
-        dx = speed_filter.update(dx_raw)
         filtered_force = F_ext_filter.update(read_force(packet))
         F_ext = filtered_force - F_ext_comp
-        ExternalForceComp(filtered_force, dx_raw)
-        x_c = admittance_control(M, D, K, control_dt, x, dx, F_ext)
-        x_servo = target_filter.update(x_c)
+        ExternalForceComp(filtered_force, trajectory.velocity)
+        trajectory_step = trajectory.step(x, F_ext, control_dt)
+        x_c = trajectory_step.target_pose
+        x_servo = x_c
 
         if args.execute:
             servo_values = pose_for_servop(
@@ -491,6 +453,9 @@ try:
             [round(value, 4) for value in x_c],
             "F_ext",
             [round(value, 3) for value in F_ext],
+            "tracking",
+            [round(value, 4) for value in trajectory_step.tracking_error],
+            "frozen=" + str(trajectory_step.frozen),
             end="\r",
             flush=True,
         )

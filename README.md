@@ -72,6 +72,10 @@ python3 admittance_control.py \
 ## 控制说明
 
 - 原导纳公式和 `M/D/K/Deadband` 参数保持不变
+- 速度式导纳输出经过速度、加速度和 Jerk 约束后再积分
+- 位置与 SO(3) 姿态使用同一约束速度生成连续目标
+- 限幅后的实际命令速度写回轨迹状态，避免内部积分饱和
+- 编码器反馈与命令跟踪误差超过门限时冻结轨迹推进
 - 力偏置使用小步长残差更新，仅在六轴速度低于门限时执行
 - 角速度由相邻位姿的 `R_current @ R_previous.T` 计算
 - 输出姿态使用与左乘姿态增量一致的旋转向量
@@ -79,8 +83,10 @@ python3 admittance_control.py \
 - `--execute` 启动时若检测到上次遗留的碰撞状态，会先停止并清除该状态
 - `--timing`：退出时打印控制周期均值、抖动、P95 和最大间隔
 - `--direct-tcp`：固定周期直接写 Dashboard TCP，不等待当前 `ServoP` 回包
-- `--speed-filter-alpha`：TCP 速度低通系数，默认 `1.0`（关闭）
-- `--target-filter-alpha`：ServoP 目标位姿低通系数，默认 `1.0`（关闭）
+- `--max-linear-velocity` / `--max-angular-velocity`：默认 `0.15 m/s` / `0.5 rad/s`
+- `--max-linear-acceleration` / `--max-angular-acceleration`：默认 `2.0 m/s²` / `6.0 rad/s²`
+- `--max-linear-jerk` / `--max-angular-jerk`：默认 `8.0 m/s³` / `24.0 rad/s³`
+- `--max-tracking-translation` / `--max-tracking-rotation`：默认 `0.03 m` / `0.15 rad`
 - `--sync-feedback`：每帧六维力触发一次控制，按反馈时间戳计算 `dt`
 - `--feedback-hz`：六维力软件输出频率，默认 `50 Hz`
 - 默认固定频率模式会后台持续读取反馈，每次控制只使用最新一帧，避免旧包积压
